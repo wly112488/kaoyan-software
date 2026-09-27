@@ -90,6 +90,20 @@ void main() {
     expect(candidate?.id, 2);
   });
 
+  test('orders never-shown items by oldest createdAt', () {
+    final candidate = selector.selectNext(
+      items: [
+        item(id: 1, topicId: 1, createdAt: DateTime.utc(2026, 9, 20)),
+        item(id: 9, topicId: 1, createdAt: DateTime.utc(2026, 9, 10)),
+      ],
+      scope: ReminderScope.allTopics(),
+      repeatCooldown: cooldown,
+      now: now,
+    );
+
+    expect(candidate?.id, 9);
+  });
+
   test('orders previously shown items by oldest lastShownAt then stable id', () {
     final oldShownAt = DateTime.utc(2026, 9, 1);
     final candidate = selector.selectNext(
@@ -113,6 +127,30 @@ void main() {
     );
 
     expect(candidate?.id, 2);
+  });
+
+  test('orders previously shown items by oldest lastShownAt', () {
+    final candidate = selector.selectNext(
+      items: [
+        item(
+          id: 9,
+          topicId: 1,
+          createdAt: DateTime.utc(2026, 8, 2),
+          lastShownAt: DateTime.utc(2026, 9, 1),
+        ),
+        item(
+          id: 1,
+          topicId: 1,
+          createdAt: DateTime.utc(2026, 8, 1),
+          lastShownAt: DateTime.utc(2026, 9, 10),
+        ),
+      ],
+      scope: ReminderScope.allTopics(),
+      repeatCooldown: cooldown,
+      now: now,
+    );
+
+    expect(candidate?.id, 9);
   });
 
   test('returns null when no item is eligible', () {
