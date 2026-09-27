@@ -67,4 +67,13 @@ void main() {
       throwsArgumentError,
     );
   });
-}
+  test('initial settings match the authoritative Spec defaults', () {
+    final settings = ReminderSettings.initial();
+
+    expect(settings.enabled, isFalse);
+    expect(settings.activeWindow.mode, ActiveWindowMode.allDay);
+    expect(settings.reminderInterval, const Duration(minutes: 60));
+    expect(settings.repeatCooldown, const Duration(hours: 24));
+    expect(settings.scope.mode, ReminderScopeMode.allTopics);
+    expect(settings.scope.topicIds, isEmpty);
+  });}

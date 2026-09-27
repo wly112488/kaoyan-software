@@ -27,6 +27,15 @@ final class ReminderSettings {
     }
   }
 
+  factory ReminderSettings.initial() {
+    return ReminderSettings(
+      enabled: false,
+      activeWindow: ActiveWindow.allDay(),
+      reminderInterval: const Duration(minutes: 60),
+      repeatCooldown: const Duration(hours: 24),
+      scope: ReminderScope.allTopics(),
+    );
+  }
   final bool enabled;
   final ActiveWindow activeWindow;
   final Duration reminderInterval;
