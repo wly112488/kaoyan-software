@@ -7,7 +7,9 @@ import 'package:kaoyan_review/data/local/topic_repository.dart';
 import 'package:kaoyan_review/domain/active_window.dart';
 import 'package:kaoyan_review/domain/reminder_scope.dart';
 import 'package:kaoyan_review/domain/reminder_settings.dart';
-import 'package:sqflite_common_ffi/sqflite_ffi.dart';
+import 'package:sqflite/sqflite.dart';
+import 'package:sqflite_common_ffi/sqflite_ffi.dart'
+    show databaseFactoryFfi, sqfliteFfiInit;
 
 void main() {
   sqfliteFfiInit();
@@ -99,4 +101,175 @@ void main() {
     expect(await db.query('reminder_scope_topics'), isEmpty);
     expect((await settings.loadSettings()).scope.mode, ReminderScopeMode.allTopics);
   });
+
+  test(
+    'loadSettings reads row and selected Topic IDs inside one transaction',
+    () async {
+      final testDir = await Directory.systemTemp.createTemp(
+        'kaoyan-read-snapshot-',
+      );
+      final recorder = _ReadBoundaryRecorder();
+      final factory = _RecordingDatabaseFactory(databaseFactoryFfi, recorder);
+      final testStore = await AppDatabase.openWith(
+        factory: factory,
+        path: '${testDir.path}${Platform.pathSeparator}app.db',
+      );
+      addTearDown(() async {
+        await testStore.close();
+        await testDir.delete(recursive: true);
+      });
+
+      final db = factory.openedDatabase!;
+      final now = DateTime.utc(2026, 9, 28);
+      final topicId = await db.insert('topics', <String, Object?>{
+        'name': 'Biology',
+        'name_key': 'biology',
+        'created_at_us': now.microsecondsSinceEpoch,
+        'updated_at_us': now.microsecondsSinceEpoch,
+      });
+      await db.update('reminder_settings', <String, Object?>{
+        'enabled': 1,
+        'scope_mode': 'selected_topics',
+      }, where: 'id = 1');
+      await db.insert('reminder_scope_topics', <String, Object?>{
+        'topic_id': topicId,
+      });
+
+      recorder.reset();
+      final loaded = await ReminderSettingsRepository(testStore).loadSettings();
+
+      expect(loaded.scope.mode, ReminderScopeMode.selectedTopics);
+      expect(loaded.scope.topicIds, <int>{topicId});
+      expect(recorder.transactionCount, 1);
+      expect(recorder.transactionQueryCount, 2);
+      expect(recorder.databaseQueryCount, 0);
+    },
+  );
+}
+
+
+final class _ReadBoundaryRecorder {
+  int transactionCount = 0;
+  int transactionQueryCount = 0;
+  int databaseQueryCount = 0;
+
+  void reset() {
+    transactionCount = 0;
+    transactionQueryCount = 0;
+    databaseQueryCount = 0;
+  }
+}
+
+final class _RecordingDatabaseFactory implements DatabaseFactory {
+  _RecordingDatabaseFactory(this._delegate, this._recorder);
+
+  final DatabaseFactory _delegate;
+  final _ReadBoundaryRecorder _recorder;
+  Database? openedDatabase;
+
+  @override
+  Future<Database> openDatabase(
+    String path, {
+    OpenDatabaseOptions? options,
+  }) async {
+    final database = await _delegate.openDatabase(path, options: options);
+    openedDatabase = database;
+    return _RecordingDatabase(database, _recorder);
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+final class _RecordingDatabase implements Database {
+  _RecordingDatabase(this._delegate, this._recorder);
+
+  final Database _delegate;
+  final _ReadBoundaryRecorder _recorder;
+
+  @override
+  Future<T> transaction<T>(
+    Future<T> Function(Transaction txn) action, {
+    bool? exclusive,
+  }) {
+    return _delegate.transaction<T>((txn) {
+      _recorder.transactionCount++;
+      return action(_RecordingTransaction(txn, _recorder));
+    }, exclusive: exclusive);
+  }
+
+  @override
+  Future<List<Map<String, Object?>>> query(
+    String table, {
+    bool? distinct,
+    List<String>? columns,
+    String? where,
+    List<Object?>? whereArgs,
+    String? groupBy,
+    String? having,
+    String? orderBy,
+    int? limit,
+    int? offset,
+  }) {
+    _recorder.databaseQueryCount++;
+    return _delegate.query(
+      table,
+      distinct: distinct,
+      columns: columns,
+      where: where,
+      whereArgs: whereArgs,
+      groupBy: groupBy,
+      having: having,
+      orderBy: orderBy,
+      limit: limit,
+      offset: offset,
+    );
+  }
+
+  @override
+  Future<void> close() => _delegate.close();
+
+  @override
+  bool get isOpen => _delegate.isOpen;
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
+}
+
+final class _RecordingTransaction implements Transaction {
+  _RecordingTransaction(this._delegate, this._recorder);
+
+  final Transaction _delegate;
+  final _ReadBoundaryRecorder _recorder;
+
+  @override
+  Future<List<Map<String, Object?>>> query(
+    String table, {
+    bool? distinct,
+    List<String>? columns,
+    String? where,
+    List<Object?>? whereArgs,
+    String? groupBy,
+    String? having,
+    String? orderBy,
+    int? limit,
+    int? offset,
+  }) {
+    _recorder.transactionQueryCount++;
+    return _delegate.query(
+      table,
+      distinct: distinct,
+      columns: columns,
+      where: where,
+      whereArgs: whereArgs,
+      groupBy: groupBy,
+      having: having,
+      orderBy: orderBy,
+      limit: limit,
+      offset: offset,
+    );
+  }
+
+  @override
+  dynamic noSuchMethod(Invocation invocation) => super.noSuchMethod(invocation);
 }
