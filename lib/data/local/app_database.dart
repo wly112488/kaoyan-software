@@ -100,6 +100,8 @@ final class AppDatabase {
           (active_window_mode = 'all_day' AND start_minute IS NULL AND end_minute IS NULL)
           OR
           (active_window_mode = 'bounded'
+            AND start_minute IS NOT NULL
+            AND end_minute IS NOT NULL
             AND start_minute BETWEEN 0 AND 1439
             AND end_minute BETWEEN 0 AND 1439
             AND start_minute <> end_minute)

@@ -76,4 +76,25 @@ void main() {
 
     await store.close();
   });
+  test('bounded window rejects null endpoints', () async {
+    final store = await AppDatabase.openWith(
+      factory: databaseFactoryFfi,
+      path: dbPath,
+    );
+    addTearDown(store.close);
+    final db = await store.database;
+
+    await expectLater(
+      db.update(
+        'reminder_settings',
+        <String, Object?>{
+          'active_window_mode': 'bounded',
+          'start_minute': null,
+          'end_minute': 60,
+        },
+        where: 'id = 1',
+      ),
+      throwsA(isA<DatabaseException>()),
+    );
+  });
 }
