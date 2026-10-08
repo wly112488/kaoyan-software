@@ -181,7 +181,10 @@ final class _FailingWorkPort implements PeriodicWorkPort {
   Future<void> cancel() async {}
 
   @override
-  Future<void> register({required Duration initialDelay}) async {
+  Future<void> register({
+    required Duration initialDelay,
+    ReminderWorkPolicy policy = ReminderWorkPolicy.replace,
+  }) async {
     throw StateError('work registration failed');
   }
 }

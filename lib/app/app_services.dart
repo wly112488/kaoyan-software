@@ -92,12 +92,13 @@ final class AppServices {
 
   Future<bool> rescheduleReminders({
     Duration minimumDelay = Duration.zero,
+    ReminderWorkPolicy policy = ReminderWorkPolicy.replace,
   }) async {
     final settings = await reminderSettings.loadSettings();
-    final foregroundSafeDelay = settings.enabled &&
-            settings.reminderInterval > minimumDelay
-        ? settings.reminderInterval
-        : minimumDelay;
-    return scheduler.reconcile(settings, minimumDelay: foregroundSafeDelay);
+    return scheduler.reconcile(
+      settings,
+      minimumDelay: minimumDelay,
+      policy: policy,
+    );
   }
 }

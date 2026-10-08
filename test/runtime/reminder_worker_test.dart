@@ -13,7 +13,7 @@ void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
   test(
-    'handled reminder worker failures return success without WorkManager retry',
+    'unhandled reminder worker failures request WorkManager retry',
     () async {
       reminderCallbackDispatcher();
       final messenger =
@@ -37,7 +37,7 @@ void main() {
         null,
       ]);
 
-      expect(taskReply, <Object?>[true]);
+      expect(taskReply, <Object?>[false]);
     },
   );
 }

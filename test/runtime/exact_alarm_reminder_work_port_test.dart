@@ -56,6 +56,47 @@ void main() {
     expect(alarm.cancelCount, 1);
     expect(fallback.cancelCount, 1);
   });
+
+  test('alarm bridge failure still registers fallback work', () async {
+    final alarm = _FakeAlarmPort(canSchedule: true)
+      ..scheduleError = StateError('background alarm bridge unavailable');
+    final fallback = _FakeWorkPort();
+    await ExactAlarmReminderWorkPort(
+      alarm: alarm,
+      fallback: fallback,
+      now: () => now,
+    ).register(initialDelay: const Duration(minutes: 1));
+    expect(fallback.registeredInitialDelay, const Duration(minutes: 1));
+  });
+
+  test(
+    'lifecycle reconciliation asks native scheduler to keep its deadline',
+    () async {
+      final alarm = _FakeAlarmPort(canSchedule: true);
+      await ExactAlarmReminderWorkPort(
+        alarm: alarm,
+        fallback: _FakeWorkPort(),
+        now: () => now,
+      ).register(
+        initialDelay: const Duration(seconds: 20),
+        policy: ReminderWorkPolicy.keep,
+      );
+      expect(alarm.keepExisting, isTrue);
+    },
+  );
+
+  test('Worker transition to native alarm does not cancel itself', () async {
+    final fallback = _FakeWorkPort();
+    await ExactAlarmReminderWorkPort(
+      alarm: _FakeAlarmPort(canSchedule: true),
+      fallback: fallback,
+      now: () => now,
+    ).register(
+      initialDelay: const Duration(minutes: 1),
+      policy: ReminderWorkPolicy.append,
+    );
+    expect(fallback.cancelCount, 0);
+  });
 }
 
 final class _FakeAlarmPort implements ExactReminderAlarmPort {
@@ -64,13 +105,17 @@ final class _FakeAlarmPort implements ExactReminderAlarmPort {
   final bool canSchedule;
   DateTime? scheduledAt;
   int cancelCount = 0;
+  Object? scheduleError;
+  bool? keepExisting;
 
   @override
   Future<bool> canScheduleExactAlarms() async => canSchedule;
 
   @override
-  Future<bool> schedule(DateTime at) async {
+  Future<bool> schedule(DateTime at, {bool keepExisting = false}) async {
+    if (scheduleError case final error?) throw error;
     scheduledAt = at;
+    this.keepExisting = keepExisting;
     return true;
   }
 
@@ -86,7 +131,10 @@ final class _FakeWorkPort implements ReminderWorkPort {
   int cancelCount = 0;
 
   @override
-  Future<void> register({required Duration initialDelay}) async {
+  Future<void> register({
+    required Duration initialDelay,
+    ReminderWorkPolicy policy = ReminderWorkPolicy.replace,
+  }) async {
     registerCount++;
     registeredInitialDelay = initialDelay;
   }

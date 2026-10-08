@@ -4,7 +4,6 @@ import android.content.Intent
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
-import android.util.Log
 import com.wly112488.android_process_state.ActivityVisibility
 import io.flutter.embedding.android.FlutterActivity
 import io.flutter.embedding.engine.FlutterEngine
@@ -31,30 +30,6 @@ class MainActivity : FlutterActivity() {
 
     override fun configureFlutterEngine(flutterEngine: FlutterEngine) {
         super.configureFlutterEngine(flutterEngine)
-        Log.i("ReminderAlarmBridge", "configureFlutterEngine: registering native channels")
-        MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "kaoyan_review/reminder_alarm")
-            .setMethodCallHandler { call, result ->
-                try {
-                    when (call.method) {
-                        "schedule" -> {
-                            val at = call.argument<Number>("atEpochMillis")?.toLong()
-                                ?: throw IllegalArgumentException("Missing alarm time")
-                            Log.i("ReminderAlarmBridge", "schedule requested: $at")
-                            val scheduled = ReminderAlarmReceiver.schedule(applicationContext, at)
-                            Log.i("ReminderAlarmBridge", "schedule result: $scheduled")
-                            result.success(scheduled)
-                        }
-                        "cancel" -> {
-                            Log.i("ReminderAlarmBridge", "cancel requested")
-                            ReminderAlarmReceiver.cancel(applicationContext)
-                            result.success(null)
-                        }
-                        else -> result.notImplemented()
-                    }
-                } catch (error: Exception) {
-                    result.error("reminder_alarm_failed", error.message, null)
-                }
-            }
         notificationTapChannel = MethodChannel(
             flutterEngine.dartExecutor.binaryMessenger,
             "kaoyan_review/notification_tap",

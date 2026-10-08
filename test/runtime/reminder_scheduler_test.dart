@@ -117,10 +117,10 @@ void main() {
       work.releaseFirstRegistration.complete();
       expect(await pauseReconcile, isTrue);
       expect(await resumeReconcile, isTrue);
-      expect(
-        work.registeredDelays,
-        <Duration>[Duration.zero, const Duration(minutes: 1)],
-      );
+      expect(work.registeredDelays, <Duration>[
+        Duration.zero,
+        const Duration(minutes: 1),
+      ]);
     },
   );
 
@@ -387,7 +387,10 @@ final class _FakePeriodicWorkPort implements ReminderWorkPort {
   Object? registerError;
 
   @override
-  Future<void> register({required Duration initialDelay}) async {
+  Future<void> register({
+    required Duration initialDelay,
+    ReminderWorkPolicy policy = ReminderWorkPolicy.replace,
+  }) async {
     registerCount++;
     registeredInitialDelay = initialDelay;
     if (registerError case final error?) throw error;
@@ -405,7 +408,10 @@ final class _BlockingWorkPort implements ReminderWorkPort {
   final registeredDelays = <Duration>[];
 
   @override
-  Future<void> register({required Duration initialDelay}) async {
+  Future<void> register({
+    required Duration initialDelay,
+    ReminderWorkPolicy policy = ReminderWorkPolicy.replace,
+  }) async {
     registeredDelays.add(initialDelay);
     if (registeredDelays.length == 1) {
       firstRegistrationStarted.complete();

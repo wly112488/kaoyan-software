@@ -8,6 +8,7 @@ import '../../domain/reminder_scope.dart';
 import '../../domain/reminder_settings.dart';
 import '../../domain/topic.dart';
 import '../../runtime/exact_alarm_permission.dart';
+import '../../runtime/reminder_scheduler.dart';
 import '../../runtime/reminder_settings_service.dart';
 import '../../runtime/review_notification_gateway.dart';
 import 'diagnostics_page.dart';
@@ -135,7 +136,9 @@ class ReminderSettingsPageState extends State<ReminderSettingsPage> {
         _permissionGranted = canPost;
       });
       if (exactAlarmAllowed && _settings.enabled) {
-        await widget.services.rescheduleReminders();
+        await widget.services.rescheduleReminders(
+          policy: ReminderWorkPolicy.keep,
+        );
       }
     } catch (error, stackTrace) {
       debugPrint('Reminder permission refresh failed: $error\n$stackTrace');

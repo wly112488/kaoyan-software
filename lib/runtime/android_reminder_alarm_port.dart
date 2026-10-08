@@ -20,20 +20,34 @@ final class AndroidReminderAlarmPort implements ExactReminderAlarmPort {
   }
 
   @override
-  Future<bool> schedule(DateTime at) async {
+  Future<bool> schedule(DateTime at, {bool keepExisting = false}) async {
     try {
-      final scheduled = await _reminderAlarmChannel.invokeMethod<bool>(
+      final scheduled =
+          await _reminderAlarmChannel.invokeMethod<bool>(
             'schedule',
-            <String, Object?>{'atEpochMillis': at.millisecondsSinceEpoch},
+            <String, Object?>{
+              'atEpochMillis': at.millisecondsSinceEpoch,
+              'keepExisting': keepExisting,
+            },
           ) ??
           false;
-      developer.log('Native exact alarm schedule result: $scheduled', name: 'reminder_alarm');
+      developer.log(
+        'Native exact alarm schedule result: $scheduled',
+        name: 'reminder_alarm',
+      );
       return scheduled;
     } on MissingPluginException {
-      developer.log('Native exact alarm channel is missing', name: 'reminder_alarm');
+      developer.log(
+        'Native exact alarm channel is missing',
+        name: 'reminder_alarm',
+      );
       return false;
     } on PlatformException catch (error) {
-      developer.log('Native exact alarm scheduling failed', name: 'reminder_alarm', error: error);
+      developer.log(
+        'Native exact alarm scheduling failed',
+        name: 'reminder_alarm',
+        error: error,
+      );
       return false;
     }
   }
@@ -43,7 +57,9 @@ final class AndroidReminderAlarmPort implements ExactReminderAlarmPort {
     try {
       await _reminderAlarmChannel.invokeMethod<void>('cancel');
     } on MissingPluginException {
-      // Background worker isolates don't have the Activity's scheduling channel.
+      // Still cancel fallback work on unsupported platforms.
+    } on PlatformException {
+      // An unavailable native alarm service must not prevent fallback work.
     }
   }
 }

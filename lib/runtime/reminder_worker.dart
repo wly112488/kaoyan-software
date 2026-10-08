@@ -36,9 +36,8 @@ Future<bool> _runReminderEvaluation({required String source}) async {
   var stage = '初始化后台提醒任务';
   try {
     DartPluginRegistrant.ensureInitialized();
-    // Both background schedulers run in an isolate. sqflite requires that
-    // isolate to own a non-singleton connection and leave it open for the
-    // isolate lifetime instead of closing the foreground app's connection.
+    // The background Engine owns its connection; closing it must not close
+    // the UI Engine's sqflite single-instance connection.
     stage = '打开本地数据库';
     store = await AppDatabase.openProduction(singleInstance: false);
     stage = '记录后台任务启动状态';
@@ -56,13 +55,20 @@ Future<bool> _runReminderEvaluation({required String source}) async {
       notifications: notifications,
     );
     final outcome = await service.runOnce(source: source);
+    if (outcome == ReminderRunOutcome.storeFailure) {
+      throw StateError('Reminder evaluation could not read or update the store');
+    }
     stage = '读取提醒设置';
     final settings = await ReminderSettingsRepository(store).loadSettings();
     stage = '安排下一次提醒';
-    await ReminderScheduler(store: store).reconcile(
+    final scheduled = await ReminderScheduler(store: store).reconcile(
       settings,
       minimumDelay: retryDelayAfterReminderRun(outcome, settings),
+      policy: ReminderWorkPolicy.append,
     );
+    if (!scheduled) {
+      throw StateError('The next reminder could not be scheduled');
+    }
     await ReminderRuntimeStateRepository(store)
         .clearWorkerFailure(await store.database);
     await runtime.recordWorkerCompleted(
@@ -114,8 +120,8 @@ Future<bool> _runReminderEvaluation({required String source}) async {
         );
       }
     }
-    // Returning success avoids WorkManager's exponential retry burst. The
-    // failure is now visible in diagnostics whenever the database is usable.
+    // A one-off task without a successor must be retried independently of UI.
+    return false;
   } finally {
     try {
       await store?.close();

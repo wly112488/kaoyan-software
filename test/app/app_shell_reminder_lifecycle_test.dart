@@ -56,6 +56,12 @@ void main() {
       enabled: true,
       now: sentAt.subtract(const Duration(days: 1)),
     );
+    await services.reviewItems.createReviewItem(
+      content: '同一主题第二条内容',
+      topicId: topic.id,
+      enabled: true,
+      now: sentAt,
+    );
     await services.reviewItems.recordShownAt(id: item.id, shownAt: sentAt);
     await services.topics.setReminderInterval(
       id: topic.id,
@@ -97,15 +103,14 @@ void main() {
   });
 
   testWidgets(
-    'paused app schedules the next reminder one interval after exit',
+    'pausing does not postpone a reminder already due in two seconds',
     (tester) async {
       await tester.pumpWidget(MaterialApp(home: AppShell(services: services)));
       await _flushDatabaseWork(tester, times: 3);
       expect(find.text(item.content), findsOneWidget);
 
-      // Place the foreground suppression just under one configured interval
-      // ago. The next opportunity must be based on that skipped evaluation,
-      // and pausing must rebase it from the foreground exit.
+      // A skipped foreground opportunity already has a deadline. Pausing
+      // must preserve it, rather than start a new complete interval.
       clock.advanceTo(DateTime.now().subtract(const Duration(seconds: 58)));
       final outcome = await tester.runAsync(services.executionService.runOnce);
       expect(outcome, ReminderRunOutcome.foregroundSuppressed);
@@ -115,10 +120,7 @@ void main() {
         services.scheduler.nextOpportunityAt,
       );
       expect(nextOpportunity, isNotNull);
-      expect(
-        nextOpportunity!.isAfter(DateTime.now()),
-        isTrue,
-      );
+      expect(nextOpportunity!.isAfter(DateTime.now()), isTrue);
 
       foreground.result = false;
       await tester.runAsync(() async {
@@ -132,8 +134,47 @@ void main() {
       expect(workPort.registeredDelays, isNotEmpty);
       expect(
         workPort.registeredDelays.last,
-        const Duration(minutes: 1),
+        lessThan(const Duration(seconds: 3)),
       );
+      expect(notifications.submittedItems, isEmpty);
+      await tester.pumpWidget(const SizedBox.shrink());
+    },
+  );
+
+  testWidgets(
+    'brief foreground visits preserve the original registered deadline',
+    (tester) async {
+      await workPort.register(initialDelay: const Duration(seconds: 20));
+      final originalAt = workPort.scheduledAt;
+      await tester.pumpWidget(MaterialApp(home: AppShell(services: services)));
+      await _flushDatabaseWork(tester, times: 2);
+      await tester.runAsync(() async {
+        for (var visit = 0; visit < 3; visit++) {
+          if (tester.binding.lifecycleState == AppLifecycleState.paused) {
+            tester.binding.handleAppLifecycleStateChanged(
+              AppLifecycleState.hidden,
+            );
+            tester.binding.handleAppLifecycleStateChanged(
+              AppLifecycleState.inactive,
+            );
+          }
+          tester.binding.handleAppLifecycleStateChanged(
+            AppLifecycleState.resumed,
+          );
+          await Future<void>.delayed(const Duration(milliseconds: 50));
+          tester.binding.handleAppLifecycleStateChanged(
+            AppLifecycleState.inactive,
+          );
+          tester.binding.handleAppLifecycleStateChanged(
+            AppLifecycleState.hidden,
+          );
+          tester.binding.handleAppLifecycleStateChanged(
+            AppLifecycleState.paused,
+          );
+          await Future<void>.delayed(const Duration(milliseconds: 50));
+        }
+      });
+      expect(workPort.scheduledAt, originalAt);
       expect(notifications.submittedItems, isEmpty);
       await tester.pumpWidget(const SizedBox.shrink());
     },
@@ -181,13 +222,20 @@ final class _FakeNotifications implements ReviewNotificationGateway {
 
 final class _FakeWorkPort implements ReminderWorkPort {
   final List<Duration> registeredDelays = <Duration>[];
+  DateTime? scheduledAt;
 
   @override
   Future<void> cancel() async {}
 
   @override
-  Future<void> register({required Duration initialDelay}) async {
+  Future<void> register({
+    required Duration initialDelay,
+    ReminderWorkPolicy policy = ReminderWorkPolicy.replace,
+  }) async {
     registeredDelays.add(initialDelay);
+    if (policy != ReminderWorkPolicy.keep || scheduledAt == null) {
+      scheduledAt = DateTime.now().add(initialDelay);
+    }
   }
 }
 

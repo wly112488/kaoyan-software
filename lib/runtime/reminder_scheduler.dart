@@ -19,8 +19,13 @@ const reminderUniqueWorkName = 'kaoyan_review.next_reminder';
 const reminderWorkerTaskName = 'reminder_evaluation';
 const legacyReminderUniqueWorkName = 'kaoyan_review.periodic_reminder';
 
+enum ReminderWorkPolicy { replace, keep, append }
+
 abstract interface class ReminderWorkPort {
-  Future<void> register({required Duration initialDelay});
+  Future<void> register({
+    required Duration initialDelay,
+    ReminderWorkPolicy policy = ReminderWorkPolicy.replace,
+  });
   Future<void> cancel();
 }
 
@@ -28,7 +33,10 @@ typedef PeriodicWorkPort = ReminderWorkPort;
 
 final class WorkmanagerOneOffWorkPort implements ReminderWorkPort {
   @override
-  Future<void> register({required Duration initialDelay}) async {
+  Future<void> register({
+    required Duration initialDelay,
+    ReminderWorkPolicy policy = ReminderWorkPolicy.replace,
+  }) async {
     // Remove periodic work created by earlier app versions. Its task name is
     // no longer handled by the current dispatcher, but it would otherwise
     // keep waking the app indefinitely after an upgrade.
@@ -36,8 +44,22 @@ final class WorkmanagerOneOffWorkPort implements ReminderWorkPort {
     await Workmanager().registerOneOffTask(
       reminderUniqueWorkName,
       reminderWorkerTaskName,
-      initialDelay: initialDelay,
-      existingWorkPolicy: ExistingWorkPolicy.update,
+      // The Android bridge serializes in whole seconds (inSeconds truncates).
+      // Round up so a due boundary cannot become an immediate retry loop.
+      initialDelay: Duration(
+        seconds:
+            (initialDelay.inMicroseconds +
+                Duration.microsecondsPerSecond -
+                1) ~/
+            Duration.microsecondsPerSecond,
+      ),
+      existingWorkPolicy: switch (policy) {
+        ReminderWorkPolicy.keep => ExistingWorkPolicy.keep,
+        ReminderWorkPolicy.replace => ExistingWorkPolicy.replace,
+        // The installed Android plugin maps update to APPEND_OR_REPLACE.
+        // A running Worker must append its successor, not cancel itself.
+        ReminderWorkPolicy.append => ExistingWorkPolicy.update,
+      },
     );
   }
 
@@ -60,16 +82,27 @@ final class ExactAlarmReminderWorkPort implements ReminderWorkPort {
   final DateTime Function() _now;
 
   @override
-  Future<void> register({required Duration initialDelay}) async {
-    final scheduleExact = await alarm.canScheduleExactAlarms();
-    if (scheduleExact) {
-      final scheduled = await alarm.schedule(_now().add(initialDelay));
-      if (scheduled) {
-        await fallback.cancel();
-        return;
+  Future<void> register({
+    required Duration initialDelay,
+    ReminderWorkPolicy policy = ReminderWorkPolicy.replace,
+  }) async {
+    var scheduled = false;
+    try {
+      if (await alarm.canScheduleExactAlarms()) {
+        scheduled = await alarm.schedule(
+          _now().add(initialDelay),
+          keepExisting: policy == ReminderWorkPolicy.keep,
+        );
       }
+    } catch (_) {
+      // A platform/permission failure must not break the fallback chain.
     }
-    await fallback.register(initialDelay: initialDelay);
+    if (scheduled) {
+      if (policy != ReminderWorkPolicy.append) await fallback.cancel();
+      return;
+    }
+    await alarm.cancel();
+    await fallback.register(initialDelay: initialDelay, policy: policy);
   }
 
   @override
@@ -123,6 +156,7 @@ final class ReminderScheduler {
     ReminderSettings settings, {
     DateTime? now,
     Duration minimumDelay = Duration.zero,
+    ReminderWorkPolicy policy = ReminderWorkPolicy.replace,
   }) {
     final previous = _reconcileTail;
     final done = Completer<void>();
@@ -133,6 +167,7 @@ final class ReminderScheduler {
       settings: settings,
       now: now,
       minimumDelay: minimumDelay,
+      policy: policy,
     );
   }
 
@@ -142,6 +177,7 @@ final class ReminderScheduler {
     required ReminderSettings settings,
     required DateTime? now,
     required Duration minimumDelay,
+    required ReminderWorkPolicy policy,
   }) async {
     await previous;
     try {
@@ -149,6 +185,7 @@ final class ReminderScheduler {
         settings,
         now: now,
         minimumDelay: minimumDelay,
+        policy: policy,
       );
     } finally {
       done.complete();
@@ -159,6 +196,7 @@ final class ReminderScheduler {
     ReminderSettings settings, {
     DateTime? now,
     required Duration minimumDelay,
+    required ReminderWorkPolicy policy,
   }) async {
     final localNow = now ?? DateTime.now();
     final utcNow = localNow.toUtc();
@@ -195,6 +233,7 @@ final class ReminderScheduler {
         final delay = scheduledAt.difference(localNow);
         await _work.register(
           initialDelay: delay.isNegative ? Duration.zero : delay,
+          policy: policy,
         );
       }
       await _runtime.recordSchedule(

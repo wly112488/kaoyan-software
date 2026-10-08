@@ -13,6 +13,7 @@ import android.database.sqlite.SQLiteDatabase
 import android.os.Build
 import android.util.Log
 import com.wly112488.android_process_state.ActivityVisibility
+import com.wly112488.android_process_state.R
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.ZoneId
@@ -37,25 +38,31 @@ class ReminderAlarmReceiver : BroadcastReceiver() {
     }
 
     companion object {
-        fun schedule(context: Context, atEpochMillis: Long): Boolean {
+        @Synchronized
+        fun schedule(context: Context, atEpochMillis: Long, keepExisting: Boolean = false): Boolean {
             val alarmManager = context.getSystemService(AlarmManager::class.java) ?: return false
             val canScheduleExact = Build.VERSION.SDK_INT < Build.VERSION_CODES.S ||
                 alarmManager.canScheduleExactAlarms()
             Log.i("ReminderAlarmBridge", "canScheduleExactAlarms=$canScheduleExact")
             if (!canScheduleExact) return false
 
-            context.getSharedPreferences(REMINDER_PREFS, Context.MODE_PRIVATE)
-                .edit().putLong(REMINDER_KEY_AT, atEpochMillis).apply()
+            val prefs = context.getSharedPreferences(REMINDER_PREFS, Context.MODE_PRIVATE)
+            val storedAt = prefs.getLong(REMINDER_KEY_AT, -1L)
+            val targetAt = if (keepExisting && storedAt > System.currentTimeMillis()) storedAt else atEpochMillis
             val pending = alarmPendingIntent(context)
             alarmManager.setExactAndAllowWhileIdle(
                 AlarmManager.RTC_WAKEUP,
-                atEpochMillis,
+                targetAt,
                 pending,
             )
-            Log.i("ReminderAlarmBridge", "exact alarm registered for $atEpochMillis")
+            // Persist only after registration succeeds. Re-registering the same
+            // deadline restores an alarm after process/Engine recreation.
+            prefs.edit().putLong(REMINDER_KEY_AT, targetAt).apply()
+            Log.i("ReminderAlarmBridge", "exact alarm registered for $targetAt")
             return true
         }
 
+        @Synchronized
         fun cancel(context: Context) {
             context.getSharedPreferences(REMINDER_PREFS, Context.MODE_PRIVATE)
                 .edit().remove(REMINDER_KEY_AT).apply()
@@ -459,7 +466,7 @@ class ReminderAlarmReceiver : BroadcastReceiver() {
                 )
             }
             val launchIntent = context.packageManager.getLaunchIntentForPackage(context.packageName)
-                ?: Intent(context, MainActivity::class.java)
+                ?: throw IllegalStateException("Application launch Activity is unavailable")
             launchIntent.putExtra(REVIEW_PAYLOAD_KEY, item.id)
             val contentIntent = PendingIntent.getActivity(
                 context,

@@ -54,9 +54,7 @@ final class ReminderRuntimeBootstrap {
       final settings = await ReminderSettingsRepository(store).loadSettings();
       await ReminderScheduler(store: store).reconcile(
         settings,
-        minimumDelay: settings.enabled
-            ? settings.reminderInterval
-            : Duration.zero,
+        policy: ReminderWorkPolicy.keep,
       );
     } finally {
       await store.close();

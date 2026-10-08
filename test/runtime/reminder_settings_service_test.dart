@@ -78,31 +78,32 @@ void main() {
     );
   });
 
-  test('saving enabled reminders waits one interval before first dispatch', () async {
-    final now = DateTime.now().toUtc();
-    final topic = await TopicRepository(store).createTopic(
-      name: '内科',
-      now: now,
-    );
-    await ReviewItemRepository(store).createReviewItem(
-      content: '保存后不应立刻弹出',
-      topicId: topic.id,
-      enabled: true,
-      now: now,
-    );
-
-    await service.save(
-      ReminderSettings(
+  test(
+    'saving enabled reminders waits one interval before first dispatch',
+    () async {
+      final now = DateTime.now().toUtc();
+      final topic = await TopicRepository(store)
+          .createTopic(name: '内科', now: now);
+      await ReviewItemRepository(store).createReviewItem(
+        content: '保存后不应立刻弹出',
+        topicId: topic.id,
         enabled: true,
-        activeWindow: ActiveWindow.allDay(),
-        reminderInterval: const Duration(minutes: 1),
-        repeatCooldown: const Duration(minutes: 1),
-        scope: ReminderScope.allTopics(),
-      ),
-    );
+        now: now,
+      );
 
-    expect(work.registeredInitialDelay, const Duration(minutes: 1));
-  });
+      await service.save(
+        ReminderSettings(
+          enabled: true,
+          activeWindow: ActiveWindow.allDay(),
+          reminderInterval: const Duration(minutes: 1),
+          repeatCooldown: const Duration(minutes: 1),
+          scope: ReminderScope.allTopics(),
+        ),
+      );
+
+      expect(work.registeredInitialDelay, const Duration(minutes: 1));
+    },
+  );
 }
 
 final class _FakeWork implements ReminderWorkPort {
@@ -112,7 +113,10 @@ final class _FakeWork implements ReminderWorkPort {
   Future<void> cancel() async {}
 
   @override
-  Future<void> register({required Duration initialDelay}) async {
+  Future<void> register({
+    required Duration initialDelay,
+    ReminderWorkPolicy policy = ReminderWorkPolicy.replace,
+  }) async {
     registeredInitialDelay = initialDelay;
   }
 }

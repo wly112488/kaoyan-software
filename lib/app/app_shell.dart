@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import 'app_services.dart';
 import '../runtime/notification_tap_bus.dart';
+import '../runtime/reminder_scheduler.dart';
 import '../features/review/review_item_detail_page.dart';
 import '../features/review/review_list_page.dart';
 import '../features/settings/reminder_settings_page.dart';
@@ -71,15 +72,14 @@ class _AppShellState extends State<AppShell> with WidgetsBindingObserver {
   void didChangeAppLifecycleState(AppLifecycleState state) {
     if (state == AppLifecycleState.resumed) {
       unawaited(_settingsPageKey.currentState?.refreshPermissionStatus());
-      // Reconcile on return so a newly granted exact-alarm capability is
-      // applied. The app is visible, so the next reminder must not be queued
-      // to fire immediately when this Activity pauses.
-      unawaited(widget.services.rescheduleReminders());
+      // Repair a missing task without changing an already registered deadline.
+      unawaited(
+        widget.services.rescheduleReminders(policy: ReminderWorkPolicy.keep),
+      );
     } else if (state == AppLifecycleState.paused) {
-      // Rebase the next opportunity from the moment the app leaves the
-      // foreground. A reminder skipped while visible must not get lost or
-      // race the transition into another app.
-      unawaited(widget.services.rescheduleReminders());
+      unawaited(
+        widget.services.rescheduleReminders(policy: ReminderWorkPolicy.keep),
+      );
     }
   }
 
