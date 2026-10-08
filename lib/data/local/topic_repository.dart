@@ -10,7 +10,11 @@ final class TopicRepository {
 
   Future<List<Topic>> listTopics() async {
     final db = await _store.database;
-    final rows = await db.query('topics', orderBy: 'id ASC');
+    return listTopicsFrom(db);
+  }
+
+  Future<List<Topic>> listTopicsFrom(DatabaseExecutor executor) async {
+    final rows = await executor.query('topics', orderBy: 'id ASC');
     return List<Topic>.unmodifiable(rows.map(_topicFromRow));
   }
 
@@ -113,10 +117,13 @@ final class TopicRepository {
         throw StateError('Topic $id does not exist');
       }
 
-      final itemCount = Sqflite.firstIntValue(await txn.rawQuery(
-            'SELECT COUNT(*) FROM review_items WHERE topic_id = ?',
-            <Object?>[id],
-          )) ??
+      final itemCount =
+          Sqflite.firstIntValue(
+            await txn.rawQuery(
+              'SELECT COUNT(*) FROM review_items WHERE topic_id = ?',
+              <Object?>[id],
+            ),
+          ) ??
           0;
       if (itemCount > 0) {
         throw StateError('Topic $id still owns ReviewItems');
@@ -151,6 +158,35 @@ final class TopicRepository {
         }
       }
 
+      final weekdayAssignments = await txn.query(
+        'reminder_weekday_topics',
+        columns: <String>['weekday'],
+        where: 'topic_id = ?',
+        whereArgs: <Object?>[id],
+        orderBy: 'weekday ASC',
+      );
+      for (final assignment in weekdayAssignments) {
+        final weekday = assignment['weekday']! as int;
+        final remaining =
+            Sqflite.firstIntValue(
+              await txn.rawQuery(
+                'SELECT COUNT(*) FROM reminder_weekday_topics WHERE weekday = ? AND topic_id <> ?',
+                <Object?>[weekday, id],
+              ),
+            ) ??
+            0;
+        if (remaining == 0) {
+          throw StateError('Cannot delete the last Topic for weekday $weekday');
+        }
+      }
+      if (weekdayAssignments.isNotEmpty) {
+        await txn.delete(
+          'reminder_weekday_topics',
+          where: 'topic_id = ?',
+          whereArgs: <Object?>[id],
+        );
+      }
+
       final deleted = await txn.delete(
         'topics',
         where: 'id = ?',
@@ -162,7 +198,43 @@ final class TopicRepository {
     });
   }
 
+  Future<void> setReminderInterval({
+    required int id,
+    required Duration? interval,
+    required DateTime now,
+  }) async {
+    final db = await _store.database;
+    final updated = await db.update(
+      'topics',
+      <String, Object?>{
+        'reminder_interval_ms': interval?.inMilliseconds,
+        'updated_at_us': now.toUtc().microsecondsSinceEpoch,
+      },
+      where: 'id = ?',
+      whereArgs: <Object?>[id],
+    );
+    if (updated != 1) throw StateError('Topic $id does not exist');
+  }
+
+  Future<void> recordRemindedAtWith(
+    DatabaseExecutor executor, {
+    required int topicId,
+    required DateTime remindedAt,
+  }) async {
+    final updated = await executor.update(
+      'topics',
+      <String, Object?>{
+        'last_reminded_at_us': remindedAt.toUtc().microsecondsSinceEpoch,
+      },
+      where: 'id = ?',
+      whereArgs: <Object?>[topicId],
+    );
+    if (updated != 1) throw StateError('Topic $topicId does not exist');
+  }
+
   Topic _topicFromRow(Map<String, Object?> row) {
+    final interval = row['reminder_interval_ms'] as int?;
+    final reminded = row['last_reminded_at_us'] as int?;
     return Topic(
       id: row['id']! as int,
       name: row['name']! as String,
@@ -174,6 +246,12 @@ final class TopicRepository {
         row['updated_at_us']! as int,
         isUtc: true,
       ),
+      reminderInterval: interval == null
+          ? null
+          : Duration(milliseconds: interval),
+      lastRemindedAt: reminded == null
+          ? null
+          : DateTime.fromMicrosecondsSinceEpoch(reminded, isUtc: true),
     );
   }
 }

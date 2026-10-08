@@ -18,24 +18,16 @@ void main() {
 
   test('rejects blank Topic name', () {
     expect(
-      () => Topic(
-        id: 1,
-        name: '   ',
-        createdAt: createdAt,
-        updatedAt: createdAt,
-      ),
+      () =>
+          Topic(id: 1, name: '   ', createdAt: createdAt, updatedAt: createdAt),
       throwsArgumentError,
     );
   });
 
   test('rejects non-positive Topic identity', () {
     expect(
-      () => Topic(
-        id: 0,
-        name: '医学',
-        createdAt: createdAt,
-        updatedAt: createdAt,
-      ),
+      () =>
+          Topic(id: 0, name: '医学', createdAt: createdAt, updatedAt: createdAt),
       throwsArgumentError,
     );
   });

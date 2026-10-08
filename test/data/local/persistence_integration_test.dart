@@ -13,69 +13,114 @@ import 'package:sqflite_common_ffi/sqflite_ffi.dart';
 void main() {
   sqfliteFfiInit();
 
-  test('persistent state remains valid across reopen and selected Topic deletion', () async {
-    final tempDir = await Directory.systemTemp.createTemp('kaoyan-integration-');
-    final path = '${tempDir.path}${Platform.pathSeparator}app.db';
-    final createdAt = DateTime.utc(2026, 9, 27, 8);
-    final shownAt = createdAt.add(const Duration(hours: 1));
+  test(
+    'persistent state remains valid across reopen and selected Topic deletion',
+    () async {
+      final tempDir = await Directory.systemTemp.createTemp(
+        'kaoyan-integration-',
+      );
+      final path = '${tempDir.path}${Platform.pathSeparator}app.db';
+      final createdAt = DateTime.utc(2026, 9, 27, 8);
+      final shownAt = createdAt.add(const Duration(hours: 1));
 
-    var store = await AppDatabase.openWith(factory: databaseFactoryFfi, path: path);
-    var topics = TopicRepository(store);
-    var items = ReviewItemRepository(store);
-    var settings = ReminderSettingsRepository(store);
+      var store = await AppDatabase.openWith(
+        factory: databaseFactoryFfi,
+        path: path,
+      );
+      var topics = TopicRepository(store);
+      var items = ReviewItemRepository(store);
+      var settings = ReminderSettingsRepository(store);
 
-    final medicine = await topics.createTopic(name: '医学', now: createdAt);
-    final biology = await topics.createTopic(name: '生物', now: createdAt);
-    final item = await items.createReviewItem(
-      content: '需要复习的段落',
-      topicId: biology.id,
-      enabled: true,
-      now: createdAt,
-    );
-    await items.recordShownAt(id: item.id, shownAt: shownAt);
-    await settings.saveSettings(ReminderSettings(
-      enabled: true,
-      activeWindow: ActiveWindow.allDay(),
-      reminderInterval: const Duration(minutes: 60),
-      repeatCooldown: const Duration(hours: 24),
-      scope: ReminderScope.selectedTopics(<int>{medicine.id, biology.id}),
-    ));
+      final medicine = await topics.createTopic(name: '医学', now: createdAt);
+      final biology = await topics.createTopic(name: '生物', now: createdAt);
+      final item = await items.createReviewItem(
+        content: '需要复习的段落',
+        topicId: biology.id,
+        enabled: true,
+        now: createdAt,
+      );
+      final secondItem = await items.createReviewItem(
+        content: '同一主题下的第二条内容',
+        topicId: biology.id,
+        enabled: true,
+        now: createdAt.add(const Duration(minutes: 1)),
+      );
+      await items.recordShownAt(id: item.id, shownAt: shownAt);
+      await settings.saveSettings(
+        ReminderSettings(
+          enabled: true,
+          activeWindow: ActiveWindow.allDay(),
+          reminderInterval: const Duration(minutes: 60),
+          repeatCooldown: const Duration(hours: 24),
+          scope: ReminderScope.selectedTopics(<int>{medicine.id, biology.id}),
+        ),
+      );
 
-    await store.close();
-    store = await AppDatabase.openWith(factory: databaseFactoryFfi, path: path);
-    topics = TopicRepository(store);
-    items = ReviewItemRepository(store);
-    settings = ReminderSettingsRepository(store);
+      await store.close();
+      store = await AppDatabase.openWith(
+        factory: databaseFactoryFfi,
+        path: path,
+      );
+      topics = TopicRepository(store);
+      items = ReviewItemRepository(store);
+      settings = ReminderSettingsRepository(store);
 
-    final reloadedItem = await items.getReviewItem(item.id);
-    expect(reloadedItem?.lastShownAt, shownAt);
-    expect((await settings.loadSettings()).scope.topicIds, <int>{medicine.id, biology.id});
+      final reloadedItem = await items.getReviewItem(item.id);
+      expect(reloadedItem?.lastShownAt, shownAt);
+      expect(
+        (await items.listReviewItems()).where(
+          (row) => row.topicId == biology.id,
+        ),
+        hasLength(2),
+      );
+      expect((await settings.loadSettings()).scope.topicIds, <int>{
+        medicine.id,
+        biology.id,
+      });
 
-    await items.updateReviewItem(
-      id: item.id,
-      content: reloadedItem!.content,
-      topicId: medicine.id,
-      enabled: reloadedItem.enabled,
-      now: createdAt.add(const Duration(hours: 2)),
-    );
-    expect((await items.getReviewItem(item.id))?.lastShownAt, shownAt);
+      await items.updateReviewItem(
+        id: item.id,
+        content: reloadedItem!.content,
+        topicId: medicine.id,
+        enabled: reloadedItem.enabled,
+        now: createdAt.add(const Duration(hours: 2)),
+      );
+      await items.updateReviewItem(
+        id: secondItem.id,
+        content: secondItem.content,
+        topicId: medicine.id,
+        enabled: secondItem.enabled,
+        now: createdAt.add(const Duration(hours: 2)),
+      );
+      expect((await items.getReviewItem(item.id))?.lastShownAt, shownAt);
 
-    await topics.deleteTopic(biology.id);
-    expect((await settings.loadSettings()).scope.topicIds, <int>{medicine.id});
+      await topics.deleteTopic(biology.id);
+      expect((await settings.loadSettings()).scope.topicIds, <int>{
+        medicine.id,
+      });
 
-    await store.close();
-    store = await AppDatabase.openWith(factory: databaseFactoryFfi, path: path);
-    settings = ReminderSettingsRepository(store);
-    items = ReviewItemRepository(store);
+      await store.close();
+      store = await AppDatabase.openWith(
+        factory: databaseFactoryFfi,
+        path: path,
+      );
+      settings = ReminderSettingsRepository(store);
+      items = ReviewItemRepository(store);
 
-    expect((await settings.loadSettings()).scope.topicIds, <int>{medicine.id});
-    expect((await items.getReviewItem(item.id))?.lastShownAt, shownAt);
+      expect((await settings.loadSettings()).scope.topicIds, <int>{
+        medicine.id,
+      });
+      expect((await items.getReviewItem(item.id))?.lastShownAt, shownAt);
 
-    final db = await store.database;
-    final columns = await db.rawQuery('PRAGMA table_info(review_items)');
-    expect(columns.map((row) => row['name']), isNot(contains('next_eligible_at')));
+      final db = await store.database;
+      final columns = await db.rawQuery('PRAGMA table_info(review_items)');
+      expect(
+        columns.map((row) => row['name']),
+        isNot(contains('next_eligible_at')),
+      );
 
-    await store.close();
-    await tempDir.delete(recursive: true);
-  });
+      await store.close();
+      await tempDir.delete(recursive: true);
+    },
+  );
 }

@@ -23,7 +23,10 @@ void main() {
   setUp(() async {
     tempDir = await Directory.systemTemp.createTemp('kaoyan-settings-test-');
     dbPath = '${tempDir.path}${Platform.pathSeparator}app.db';
-    store = await AppDatabase.openWith(factory: databaseFactoryFfi, path: dbPath);
+    store = await AppDatabase.openWith(
+      factory: databaseFactoryFfi,
+      path: dbPath,
+    );
     topics = TopicRepository(store);
     settings = ReminderSettingsRepository(store);
   });
@@ -48,38 +51,56 @@ void main() {
     final now = DateTime.utc(2026, 9, 27);
     final a = await topics.createTopic(name: '医学', now: now);
     final b = await topics.createTopic(name: '生物', now: now);
-    await settings.saveSettings(ReminderSettings(
-      enabled: true,
-      activeWindow: ActiveWindow.bounded(startMinute: 22 * 60, endMinute: 60),
-      reminderInterval: const Duration(minutes: 30),
-      repeatCooldown: const Duration(hours: 48),
-      scope: ReminderScope.selectedTopics(<int>{a.id, b.id}),
-    ));
+    await settings.saveSettings(
+      ReminderSettings(
+        enabled: true,
+        activeWindow: ActiveWindow.bounded(
+          startMinute: 9 * 60,
+          endMinute: 22 * 60,
+        ),
+        reminderInterval: const Duration(minutes: 30),
+        repeatCooldown: const Duration(hours: 48),
+        scope: ReminderScope.selectedTopics(<int>{a.id, b.id}),
+        weeklyTopicIds: <int, Set<int>>{
+          DateTime.monday: <int>{a.id, b.id},
+          DateTime.friday: <int>{b.id},
+        },
+      ),
+    );
 
     await store.close();
-    store = await AppDatabase.openWith(factory: databaseFactoryFfi, path: dbPath);
+    store = await AppDatabase.openWith(
+      factory: databaseFactoryFfi,
+      path: dbPath,
+    );
     settings = ReminderSettingsRepository(store);
 
     final loaded = await settings.loadSettings();
     expect(loaded.enabled, isTrue);
     expect(loaded.activeWindow.mode, ActiveWindowMode.bounded);
-    expect(loaded.activeWindow.startMinute, 22 * 60);
-    expect(loaded.activeWindow.endMinute, 60);
+    expect(loaded.activeWindow.startMinute, 9 * 60);
+    expect(loaded.activeWindow.endMinute, 22 * 60);
     expect(loaded.reminderInterval, const Duration(minutes: 30));
     expect(loaded.repeatCooldown, const Duration(hours: 48));
     expect(loaded.scope.mode, ReminderScopeMode.selectedTopics);
     expect(loaded.scope.topicIds, <int>{a.id, b.id});
+    expect(loaded.weeklyTopicIds, <int, Set<int>>{
+      DateTime.monday: <int>{a.id, b.id},
+      DateTime.friday: <int>{b.id},
+    });
   });
 
   test('selected scope rejects missing Topic ids', () async {
     expect(
-      () => settings.saveSettings(ReminderSettings(
-        enabled: false,
-        activeWindow: ActiveWindow.allDay(),
-        reminderInterval: const Duration(minutes: 60),
-        repeatCooldown: const Duration(hours: 24),
-        scope: ReminderScope.selectedTopics(<int>{999}),
-      )),
+      () => settings.saveSettings(
+        ReminderSettings(
+          enabled: false,
+          activeWindow: ActiveWindow.allDay(),
+          reminderInterval: const Duration(minutes: 60),
+          repeatCooldown: const Duration(hours: 24),
+          scope: ReminderScope.selectedTopics(<int>{999}),
+        ),
+      ),
       throwsStateError,
     );
   });
@@ -87,23 +108,28 @@ void main() {
   test('saving ALL_TOPICS clears persisted selected Topic rows', () async {
     final now = DateTime.utc(2026, 9, 27);
     final topic = await topics.createTopic(name: '医学', now: now);
-    await settings.saveSettings(ReminderSettings(
-      enabled: false,
-      activeWindow: ActiveWindow.allDay(),
-      reminderInterval: const Duration(minutes: 60),
-      repeatCooldown: const Duration(hours: 24),
-      scope: ReminderScope.selectedTopics(<int>{topic.id}),
-    ));
+    await settings.saveSettings(
+      ReminderSettings(
+        enabled: false,
+        activeWindow: ActiveWindow.allDay(),
+        reminderInterval: const Duration(minutes: 60),
+        repeatCooldown: const Duration(hours: 24),
+        scope: ReminderScope.selectedTopics(<int>{topic.id}),
+      ),
+    );
 
     await settings.saveSettings(ReminderSettings.initial());
 
     final db = await store.database;
     expect(await db.query('reminder_scope_topics'), isEmpty);
-    expect((await settings.loadSettings()).scope.mode, ReminderScopeMode.allTopics);
+    expect(
+      (await settings.loadSettings()).scope.mode,
+      ReminderScopeMode.allTopics,
+    );
   });
 
   test(
-    'loadSettings reads row and selected Topic IDs inside one transaction',
+    'loadSettings reads settings and topic IDs in one SQLite snapshot query',
     () async {
       final testDir = await Directory.systemTemp.createTemp(
         'kaoyan-read-snapshot-',
@@ -140,23 +166,61 @@ void main() {
 
       expect(loaded.scope.mode, ReminderScopeMode.selectedTopics);
       expect(loaded.scope.topicIds, <int>{topicId});
-      expect(recorder.transactionCount, 1);
-      expect(recorder.transactionQueryCount, 2);
+      expect(recorder.transactionCount, 0);
+      expect(recorder.rawQueryCount, 1);
+      expect(recorder.rawQueryText, contains('selected_topic_ids'));
+      expect(recorder.rawQueryText, contains('weekday_topic_ids'));
       expect(recorder.databaseQueryCount, 0);
     },
   );
-}
 
+  test('settings snapshot reads do not contend with a worker write', () async {
+    final testDir = await Directory.systemTemp.createTemp(
+      'kaoyan-worker-read-Write-',
+    );
+    final path = '${testDir.path}${Platform.pathSeparator}app.db';
+    final foreground = await AppDatabase.openWith(
+      factory: databaseFactoryFfi,
+      path: path,
+    );
+    final worker = await AppDatabase.openWith(
+      factory: databaseFactoryFfi,
+      path: path,
+      singleInstance: false,
+    );
+    addTearDown(() async {
+      await foreground.close();
+      await worker.close();
+      await testDir.delete(recursive: true);
+    });
+
+    final workerDb = await worker.database;
+    final workerWrite = workerDb.transaction((txn) async {
+      await txn.update('reminder_runtime_state', <String, Object?>{
+        'last_evaluation_outcome': 'notification_pending',
+      }, where: 'id = 1');
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    });
+
+    final loaded = await ReminderSettingsRepository(foreground).loadSettings();
+    expect(loaded.scope.mode, ReminderScopeMode.allTopics);
+    await workerWrite;
+  });
+}
 
 final class _ReadBoundaryRecorder {
   int transactionCount = 0;
   int transactionQueryCount = 0;
   int databaseQueryCount = 0;
+  int rawQueryCount = 0;
+  String? rawQueryText;
 
   void reset() {
     transactionCount = 0;
     transactionQueryCount = 0;
     databaseQueryCount = 0;
+    rawQueryCount = 0;
+    rawQueryText = null;
   }
 }
 
@@ -224,6 +288,16 @@ final class _RecordingDatabase implements Database {
       limit: limit,
       offset: offset,
     );
+  }
+
+  @override
+  Future<List<Map<String, Object?>>> rawQuery(
+    String sql, [
+    List<Object?>? arguments,
+  ]) {
+    _recorder.rawQueryCount++;
+    _recorder.rawQueryText = sql;
+    return _delegate.rawQuery(sql, arguments);
   }
 
   @override

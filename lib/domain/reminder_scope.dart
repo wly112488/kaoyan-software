@@ -2,7 +2,7 @@ enum ReminderScopeMode { allTopics, selectedTopics }
 
 final class ReminderScope {
   ReminderScope._(this.mode, Set<int> topicIds)
-      : topicIds = Set<int>.unmodifiable(topicIds);
+    : topicIds = Set<int>.unmodifiable(topicIds);
 
   factory ReminderScope.allTopics() {
     return ReminderScope._(ReminderScopeMode.allTopics, const <int>{});

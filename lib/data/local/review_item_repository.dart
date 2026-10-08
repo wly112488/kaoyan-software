@@ -10,7 +10,13 @@ final class ReviewItemRepository {
 
   Future<List<ReviewItem>> listReviewItems() async {
     final db = await _store.database;
-    final rows = await db.query('review_items', orderBy: 'id ASC');
+    return listReviewItemsFrom(db);
+  }
+
+  Future<List<ReviewItem>> listReviewItemsFrom(
+    DatabaseExecutor executor,
+  ) async {
+    final rows = await executor.query('review_items', orderBy: 'id ASC');
     return List<ReviewItem>.unmodifiable(rows.map(_itemFromRow));
   }
 
@@ -32,7 +38,11 @@ final class ReviewItemRepository {
     required DateTime now,
   }) async {
     if (content.trim().isEmpty) {
-      throw ArgumentError.value(content, 'content', 'ReviewItem content must not be blank');
+      throw ArgumentError.value(
+        content,
+        'content',
+        'ReviewItem content must not be blank',
+      );
     }
     final db = await _store.database;
     final timestamp = now.toUtc().microsecondsSinceEpoch;
@@ -46,6 +56,7 @@ final class ReviewItemRepository {
         'created_at_us': timestamp,
         'updated_at_us': timestamp,
         'last_shown_at_us': null,
+        'reminder_count': 0,
       });
       return ReviewItem(
         id: id,
@@ -66,7 +77,11 @@ final class ReviewItemRepository {
     required DateTime now,
   }) async {
     if (content.trim().isEmpty) {
-      throw ArgumentError.value(content, 'content', 'ReviewItem content must not be blank');
+      throw ArgumentError.value(
+        content,
+        'content',
+        'ReviewItem content must not be blank',
+      );
     }
     final db = await _store.database;
 
@@ -107,18 +122,22 @@ final class ReviewItemRepository {
     required DateTime shownAt,
   }) async {
     final db = await _store.database;
-    final updated = await db.update(
-      'review_items',
-      <String, Object?>{
-        'last_shown_at_us': shownAt.toUtc().microsecondsSinceEpoch,
-      },
-      where: 'id = ?',
-      whereArgs: <Object?>[id],
+    await recordShownAtWith(db, id: id, shownAt: shownAt);
+    return (await getReviewItem(id))!;
+  }
+
+  Future<void> recordShownAtWith(
+    DatabaseExecutor executor, {
+    required int id,
+    required DateTime shownAt,
+  }) async {
+    final updated = await executor.rawUpdate(
+      'UPDATE review_items SET last_shown_at_us = ?, reminder_count = reminder_count + 1 WHERE id = ?',
+      <Object?>[shownAt.toUtc().microsecondsSinceEpoch, id],
     );
     if (updated != 1) {
       throw StateError('ReviewItem $id does not exist');
     }
-    return (await getReviewItem(id))!;
   }
 
   Future<void> deleteReviewItem(int id) async {
@@ -164,6 +183,7 @@ final class ReviewItemRepository {
       lastShownAt: lastShown == null
           ? null
           : DateTime.fromMicrosecondsSinceEpoch(lastShown, isUtc: true),
+      reminderCount: row['reminder_count'] as int? ?? 0,
     );
   }
 }

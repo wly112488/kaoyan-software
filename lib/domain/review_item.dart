@@ -7,6 +7,7 @@ final class ReviewItem {
     required this.createdAt,
     required this.updatedAt,
     this.lastShownAt,
+    this.reminderCount = 0,
   }) {
     if (id <= 0) {
       throw ArgumentError.value(id, 'id', 'ReviewItem id must be positive');
@@ -34,4 +35,5 @@ final class ReviewItem {
   final DateTime createdAt;
   final DateTime updatedAt;
   final DateTime? lastShownAt;
+  final int reminderCount;
 }

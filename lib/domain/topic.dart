@@ -14,6 +14,8 @@ final class Topic {
     required String name,
     required this.createdAt,
     required this.updatedAt,
+    this.reminderInterval,
+    this.lastRemindedAt,
   }) : name = normalizeTopicName(name) {
     if (id <= 0) {
       throw ArgumentError.value(id, 'id', 'Topic id must be positive');
@@ -24,4 +26,6 @@ final class Topic {
   final String name;
   final DateTime createdAt;
   final DateTime updatedAt;
+  final Duration? reminderInterval;
+  final DateTime? lastRemindedAt;
 }
