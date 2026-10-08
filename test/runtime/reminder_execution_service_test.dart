@@ -259,6 +259,7 @@ void main() {
       now.add(const Duration(minutes: 4)),
       DateTime(2026, 9, 28, 12, 4),
     );
+    notifications.accepted.clear(); // The user cleared the accepted notification.
     foreground.result = true;
     expect(
       await createService().runOnce(),
@@ -435,14 +436,22 @@ final class _FakeNotifications implements TrackedReviewNotificationGateway {
   final accepted = <int, DateTime>{};
 
   @override
-  Future<void> submitTracked(ReviewItem item, DateTime dispatchAt) async {
+  Future<bool> submitTracked(
+    ReviewItem item,
+    DateTime dispatchAt,
+    String dispatchToken,
+  ) async {
     await submit(item);
     accepted[item.id] = dispatchAt;
+    return true;
   }
 
   @override
   Future<bool> wasSubmitted(int itemId, DateTime dispatchAt) async =>
       accepted[itemId] == dispatchAt;
+
+  @override
+  Future<bool?> fencePendingDispatch(String dispatchToken) async => false;
 
   @override
   Future<void> initialize({void Function(int itemId)? onTap}) async {}

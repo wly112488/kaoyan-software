@@ -23,6 +23,7 @@ import com.wly112488.android_process_state.R
 import java.time.LocalDate
 import java.time.LocalDateTime
 import java.time.ZoneId
+import java.util.UUID
 
 private const val REMINDER_ALARM_ID = 0x4B5256
 private const val REMINDER_CHANNEL_ID = "study_reminders"
@@ -32,6 +33,7 @@ private const val REMINDER_KEY_AT = "next_at_epoch_millis"
 private const val REVIEW_PAYLOAD_KEY = "reviewItemId"
 private const val NATIVE_RECOVERY_WORK = "kaoyan_review.native_recovery"
 private const val DISPATCH_LEASE_MILLIS = 180_000L
+        private val dispatchLock = Any()
 
 class ReminderAlarmReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
@@ -202,6 +204,9 @@ class ReminderAlarmReceiver : BroadcastReceiver() {
                     val pending = JSONObject()
                         .put("item_id", candidate.id).put("topic_id", candidate.topicId)
                         .put("dispatch_at_us", nowMillis*1000L).put("owner_pid", Process.myPid())
+                        .put("dispatch_token", UUID.randomUUID().toString())
+                        .put("notification_accepted", false)
+                        .put("dispatch_fenced", false)
                         .put("previous_count", candidate.reminderCount)
                         .put("previous_item_at_us", candidate.lastShownAtMillis?.times(1000L) ?: JSONObject.NULL)
                         .put("previous_topic_at_us", previousTopicLastRemindedAtMillis?.times(1000L) ?: JSONObject.NULL)
@@ -237,6 +242,7 @@ class ReminderAlarmReceiver : BroadcastReceiver() {
                     dispatchReservation = DispatchReservation(
                         candidate = candidate,
                         dispatchedAtMillis = nowMillis,
+                        token = pending.getString("dispatch_token"),
                         previousTopicLastRemindedAtMillis = previousTopicLastRemindedAtMillis,
                         previousRuntime = runtime,
                     )
@@ -251,12 +257,26 @@ class ReminderAlarmReceiver : BroadcastReceiver() {
                         updateRuntime(db, nowMillis, if (foreground) "foregroundSuppressed" else "notificationUnavailable", "scheduled_alarm")
                         return scheduleNext(context, nowMillis + readSettings(db).intervalMillis, fromWorker)
                     }
-                    postReviewNotification(context, evaluation.candidate, dispatchReservation!!.dispatchedAtMillis)
+                    val reservation = dispatchReservation!!
+                    if (!submitReservedNotification(
+                            context,
+                            reservation.token,
+                            evaluation.candidate.id,
+                            evaluation.candidate.content,
+                            reservation.dispatchedAtMillis,
+                        )) {
+                        return scheduleNext(
+                            context,
+                            System.currentTimeMillis() + 1_000L,
+                            fromWorker,
+                            keepExisting = true,
+                        )
+                    }
                     notificationSubmitted = true
                     db.execSQL("""UPDATE reminder_runtime_state SET pending_dispatch_json = NULL,
                         last_evaluation_outcome = 'notification_submitted', last_worker_outcome = 'nativeAlarmCompleted'
                         WHERE id = 1 AND last_dispatch_at_us = ? AND last_dispatch_item_id = ?""",
-                        arrayOf<Any?>(dispatchReservation!!.dispatchedAtMillis*1000L, evaluation.candidate.id))
+                        arrayOf<Any?>(reservation.dispatchedAtMillis*1000L, evaluation.candidate.id))
                     Log.i(
                         "ReminderAlarmReceiver",
                         "submitted review notification itemId=${evaluation.candidate.id}",
@@ -292,12 +312,87 @@ class ReminderAlarmReceiver : BroadcastReceiver() {
             }
         }
 
+        private fun SQLiteDatabase.booleanTransaction(block: () -> Boolean): Boolean {
+            beginTransaction()
+            try {
+                val result = block()
+                if (result) setTransactionSuccessful()
+                return result
+            } finally {
+                endTransaction()
+            }
+        }
+
         private fun readPendingDispatch(db: SQLiteDatabase): String? =
             db.rawQuery("SELECT pending_dispatch_json FROM reminder_runtime_state WHERE id = 1", null).use {
                 if (!it.moveToFirst() || it.isNull(0)) null else it.getString(0)
             }
 
         fun wasSubmitted(context: Context, itemId: Int, dispatchAtMillis: Long): Boolean {
+            val file = context.getDatabasePath("kaoyan_review.db")
+            if (file.exists()) {
+                val db = SQLiteDatabase.openDatabase(
+                    file.path,
+                    null,
+                    SQLiteDatabase.OPEN_READONLY or SQLiteDatabase.NO_LOCALIZED_COLLATORS,
+                )
+                try {
+                    val encoded = readPendingDispatch(db)
+                    if (encoded != null) {
+                        val pending = JSONObject(encoded)
+                        if (pending.optInt("item_id") == itemId &&
+                            pending.optLong("dispatch_at_us") / 1_000L == dispatchAtMillis &&
+                            pending.optBoolean("notification_accepted")) return true
+                    }
+                } finally {
+                    db.close()
+                }
+            }
+            return isNotificationActive(context, itemId, dispatchAtMillis)
+        }
+
+        fun fencePendingDispatch(context: Context, dispatchToken: String): Boolean? =
+            synchronized(dispatchLock) {
+                val file = context.getDatabasePath("kaoyan_review.db")
+                if (!file.exists()) return@synchronized null
+                val db = SQLiteDatabase.openDatabase(
+                    file.path,
+                    null,
+                    SQLiteDatabase.OPEN_READWRITE or SQLiteDatabase.NO_LOCALIZED_COLLATORS,
+                )
+                try {
+                    val encoded = readPendingDispatch(db) ?: return@synchronized null
+                    val pending = JSONObject(encoded)
+                    if (pending.optString("dispatch_token") != dispatchToken) {
+                        return@synchronized null
+                    }
+                    val dispatchAtMillis = pending.optLong("dispatch_at_us") / 1_000L
+                    if (pending.optInt("owner_pid") == Process.myPid() &&
+                        System.currentTimeMillis() < dispatchAtMillis + DISPATCH_LEASE_MILLIS
+                    ) return@synchronized null
+
+                    val submitted = pending.optBoolean("notification_accepted") ||
+                        isNotificationActive(context, pending.optInt("item_id"), dispatchAtMillis)
+                    pending.put("dispatch_fenced", true)
+                    pending.put("notification_accepted", submitted)
+                    val fenced = db.booleanTransaction {
+                        if (readPendingDispatch(db) != encoded) {
+                            false
+                        } else {
+                            db.execSQL(
+                                "UPDATE reminder_runtime_state SET pending_dispatch_json = ? WHERE id = 1 AND pending_dispatch_json = ?",
+                                arrayOf<Any?>(pending.toString(), encoded),
+                            )
+                            true
+                        }
+                    }
+                    if (fenced) submitted else null
+                } finally {
+                    db.close()
+                }
+            }
+
+        private fun isNotificationActive(context: Context, itemId: Int, dispatchAtMillis: Long): Boolean {
             val manager = context.getSystemService(NotificationManager::class.java) ?: return false
             return manager.activeNotifications.any {
                 it.id == itemId && it.tag == null && it.notification.`when` == dispatchAtMillis &&
@@ -305,13 +400,63 @@ class ReminderAlarmReceiver : BroadcastReceiver() {
             }
         }
 
-        private fun recoverPendingDispatch(context: Context, db: SQLiteDatabase, now: Long): Long? {
+        fun submitReservedNotification(
+            context: Context,
+            dispatchToken: String,
+            itemId: Int,
+            content: String,
+            dispatchAtMillis: Long,
+        ): Boolean = synchronized(dispatchLock) {
+            val file = context.getDatabasePath("kaoyan_review.db")
+            if (!file.exists()) return@synchronized false
+            val db = SQLiteDatabase.openDatabase(
+                file.path,
+                null,
+                SQLiteDatabase.OPEN_READWRITE or SQLiteDatabase.NO_LOCALIZED_COLLATORS,
+            )
+            try {
+                val encoded = readPendingDispatch(db) ?: return@synchronized false
+                val pending = JSONObject(encoded)
+                if (pending.optString("dispatch_token") != dispatchToken ||
+                    pending.optInt("item_id") != itemId ||
+                    pending.optLong("dispatch_at_us") / 1_000L != dispatchAtMillis
+                ) return@synchronized false
+                if (pending.optBoolean("dispatch_fenced")) return@synchronized false
+                if (pending.optBoolean("notification_accepted")) return@synchronized true
+                if (System.currentTimeMillis() >= dispatchAtMillis + DISPATCH_LEASE_MILLIS) {
+                    return@synchronized false
+                }
+
+                postReviewNotification(
+                    context,
+                    Item(itemId, content, pending.optInt("topic_id"), true, 0L, null, 0),
+                    dispatchAtMillis,
+                )
+                pending.put("notification_accepted", true)
+                db.booleanTransaction {
+                    if (readPendingDispatch(db) != encoded) {
+                        false
+                    } else {
+                        db.execSQL(
+                            "UPDATE reminder_runtime_state SET pending_dispatch_json = ? WHERE id = 1 AND pending_dispatch_json = ?",
+                            arrayOf<Any?>(pending.toString(), encoded),
+                        )
+                        true
+                    }
+                }
+            } finally {
+                db.close()
+            }
+        }
+
+        private fun recoverPendingDispatch(context: Context, db: SQLiteDatabase, now: Long): Long? = synchronized(dispatchLock) {
             val encoded = readPendingDispatch(db) ?: return null
             val pending = JSONObject(encoded)
             val dispatchUs = pending.getLong("dispatch_at_us")
             val until = dispatchUs/1000L + DISPATCH_LEASE_MILLIS
             if (pending.getInt("owner_pid") == Process.myPid() && now < until) return until
-            val submitted = wasSubmitted(context, pending.getInt("item_id"), dispatchUs/1000L)
+            val submitted = pending.optBoolean("notification_accepted") ||
+                wasSubmitted(context, pending.getInt("item_id"), dispatchUs/1000L)
             fun previous(key: String): Any? = if (pending.isNull(key)) null else pending.get(key)
             db.transaction {
                 if (readPendingDispatch(db) != encoded) return@transaction Evaluation(null, null)
@@ -327,7 +472,7 @@ class ReminderAlarmReceiver : BroadcastReceiver() {
                     arrayOf<Any?>(now*1000L, if (submitted) "notification_submitted" else "dispatch_recovered"))
                 Evaluation(null, null)
             }
-            return null
+            null
         }
 
         private fun readSettings(db: SQLiteDatabase): Settings {
@@ -643,6 +788,7 @@ private data class Runtime(
 private data class DispatchReservation(
     val candidate: Item,
     val dispatchedAtMillis: Long,
+    val token: String,
     val previousTopicLastRemindedAtMillis: Long?,
     val previousRuntime: Runtime,
 )

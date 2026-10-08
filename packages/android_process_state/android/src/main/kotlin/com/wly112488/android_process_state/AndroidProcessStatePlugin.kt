@@ -18,6 +18,26 @@ class AndroidProcessStatePlugin : FlutterPlugin, MethodChannel.MethodCallHandler
             try {
                 when (call.method) {
                     "supportsNotificationChannels" -> result.success(android.os.Build.VERSION.SDK_INT >= 26)
+                    "submitReservedNotification" -> result.success(
+                        ReminderAlarmReceiver.submitReservedNotification(
+                            context,
+                            call.argument<String>("dispatchToken")
+                                ?: throw IllegalArgumentException("Missing dispatch token"),
+                            call.argument<Number>("itemId")?.toInt()
+                                ?: throw IllegalArgumentException("Missing item ID"),
+                            call.argument<String>("content")
+                                ?: throw IllegalArgumentException("Missing notification content"),
+                            call.argument<Number>("dispatchAtMillis")?.toLong()
+                                ?: throw IllegalArgumentException("Missing dispatch time"),
+                        ),
+                    )
+                    "fencePendingDispatch" -> result.success(
+                        ReminderAlarmReceiver.fencePendingDispatch(
+                            context,
+                            call.argument<String>("dispatchToken")
+                                ?: throw IllegalArgumentException("Missing dispatch token"),
+                        ),
+                    )
                     "wasSubmitted" -> result.success(ReminderAlarmReceiver.wasSubmitted(
                         context,
                         call.argument<Number>("itemId")!!.toInt(),

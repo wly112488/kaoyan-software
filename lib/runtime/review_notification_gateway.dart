@@ -57,7 +57,12 @@ abstract interface class ReviewNotificationGateway {
 
 abstract interface class TrackedReviewNotificationGateway
     implements ReviewNotificationGateway {
-  Future<void> submitTracked(ReviewItem item, DateTime dispatchAt);
+  Future<bool> submitTracked(
+    ReviewItem item,
+    DateTime dispatchAt,
+    String dispatchToken,
+  );
+  Future<bool?> fencePendingDispatch(String dispatchToken);
   Future<bool> wasSubmitted(int itemId, DateTime dispatchAt);
 }
 
@@ -159,8 +164,26 @@ final class AndroidReviewNotificationGateway
   Future<void> submit(ReviewItem item) => _submit(item, null);
 
   @override
-  Future<void> submitTracked(ReviewItem item, DateTime dispatchAt) =>
-      _submit(item, dispatchAt);
+  Future<bool> submitTracked(
+    ReviewItem item,
+    DateTime dispatchAt,
+    String dispatchToken,
+  ) async =>
+      await const MethodChannel('kaoyan_review/reminder_alarm')
+          .invokeMethod<bool>('submitReservedNotification', {
+            'itemId': item.id,
+            'content': item.content,
+            'dispatchAtMillis': dispatchAt.millisecondsSinceEpoch,
+            'dispatchToken': dispatchToken,
+          }) ??
+      false;
+
+  @override
+  Future<bool?> fencePendingDispatch(String dispatchToken) async =>
+      await const MethodChannel('kaoyan_review/reminder_alarm')
+          .invokeMethod<bool>('fencePendingDispatch', {
+            'dispatchToken': dispatchToken,
+          });
 
   @override
   Future<bool> wasSubmitted(int itemId, DateTime dispatchAt) async =>

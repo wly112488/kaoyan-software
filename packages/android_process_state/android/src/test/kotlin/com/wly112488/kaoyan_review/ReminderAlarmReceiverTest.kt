@@ -60,11 +60,13 @@ class ReminderAlarmReceiverTest {
 
     @After fun close() { if (db.isOpen) db.close() }
 
-    private fun interruptedReservation(): Long {
+    private fun interruptedReservation(notificationAccepted: Boolean = false): Long {
         val atUs = (System.currentTimeMillis()-240000)*1000
         val pending = JSONObject()
             .put("item_id", 1).put("topic_id", 1).put("dispatch_at_us", atUs)
             .put("owner_pid", -1).put("previous_count", 0)
+            .put("dispatch_token", "current-token")
+            .put("notification_accepted", notificationAccepted)
         for (key in listOf("previous_item_at_us", "previous_topic_at_us", "previous_dispatch_at_us",
             "previous_dispatch_item_id", "previous_dispatch_topic_id")) pending.put(key, JSONObject.NULL)
         db.execSQL("UPDATE review_items SET last_shown_at_us = ?, reminder_count = 1 WHERE id = 1", arrayOf(atUs))
@@ -85,19 +87,32 @@ class ReminderAlarmReceiverTest {
         }
     }
 
-    @Test fun acceptedReservationIsAcknowledgedWithoutRepostingWhileForeground() {
-        val atUs = interruptedReservation()
-        val manager = context.getSystemService(NotificationManager::class.java)
-        manager.createNotificationChannel(NotificationChannel("study_reminders", "Review", NotificationManager.IMPORTANCE_HIGH))
-        manager.notify(1, Notification.Builder(context, "study_reminders")
-            .setSmallIcon(android.R.drawable.ic_dialog_info).setWhen(atUs/1000).build())
+    @Test fun acceptedReservationSurvivesNotificationClearBeforeRecovery() {
+        interruptedReservation(notificationAccepted = true)
         ActivityVisibility.onActivityResumed()
         ShadowAlarmManager.setCanScheduleExactAlarms(true)
         assertTrue(ReminderAlarmReceiver.runEvaluation(context))
         db.rawQuery("SELECT pending_dispatch_json FROM reminder_runtime_state", null).use {
             assertTrue(it.moveToFirst()); assertTrue("Accepted delivery must clear the durable reservation", it.isNull(0))
         }
-        assertEquals(1, manager.activeNotifications.size)
+        db.rawQuery("SELECT reminder_count FROM review_items WHERE id = 1", null).use {
+            assertTrue(it.moveToFirst()); assertEquals("Clearing an accepted notification cannot undo its history", 1, it.getInt(0))
+        }
+        assertEquals(0, context.getSystemService(NotificationManager::class.java).activeNotifications.size)
+    }
+
+    @Test fun fencedDispatchCannotPostAfterRecoveryStarts() {
+        val atUs = interruptedReservation()
+        assertFalse(ReminderAlarmReceiver.fencePendingDispatch(context, "current-token")!!)
+        val accepted = ReminderAlarmReceiver.submitReservedNotification(
+            context,
+            "current-token",
+            1,
+            "late content",
+            atUs / 1000,
+        )
+        assertFalse("A fenced dispatch must be rejected before NotificationManager", accepted)
+        assertEquals(0, context.getSystemService(NotificationManager::class.java).activeNotifications.size)
     }
 
     @Test fun storedAlarmWithoutExactPermissionHasPersistentFallback() {

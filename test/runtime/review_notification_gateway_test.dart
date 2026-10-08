@@ -103,25 +103,22 @@ void main() {
     );
   });
 
-  test('review notification uses expandable long-text style', () async {
-    AndroidFlutterLocalNotificationsPlugin.registerWith();
-    debugDefaultTargetPlatformOverride = TargetPlatform.android;
-    const channel = MethodChannel('dexterous.com/flutter/local_notifications');
+  test('tracked notification dispatch is fenced by its durable token', () async {
+    const channel = MethodChannel('kaoyan_review/reminder_alarm');
     final calls = <MethodCall>[];
     final messenger =
         TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
     messenger.setMockMethodCallHandler(channel, (call) async {
       calls.add(call);
-      return null;
+      return true;
     });
     addTearDown(() {
-      debugDefaultTargetPlatformOverride = null;
       messenger.setMockMethodCallHandler(channel, null);
     });
 
     const content = 'expanded review body';
     final dispatchAt = DateTime.utc(2026, 10, 8, 12);
-    await AndroidReviewNotificationGateway().submitTracked(
+    expect(await AndroidReviewNotificationGateway().submitTracked(
       ReviewItem(
         id: 7,
         content: content,
@@ -131,14 +128,35 @@ void main() {
         updatedAt: DateTime.utc(2026),
       ),
       dispatchAt,
-    );
+      'dispatch-token',
+    ), isTrue);
 
-    final call = calls.singleWhere((call) => call.method == 'show');
+    final call = calls.single;
+    expect(call.method, 'submitReservedNotification');
     final args = call.arguments as Map<Object?, Object?>;
-    final specifics = args['platformSpecifics'] as Map<Object?, Object?>;
-    final style = specifics['styleInformation'] as Map<Object?, Object?>;
-    expect(style['bigText'], content);
-    expect(specifics['when'], dispatchAt.millisecondsSinceEpoch);
+    expect(args['itemId'], 7);
+    expect(args['content'], content);
+    expect(args['dispatchAtMillis'], dispatchAt.millisecondsSinceEpoch);
+    expect(args['dispatchToken'], 'dispatch-token');
+  });
+
+  test('pending recovery fences the old dispatcher in the native gate', () async {
+    const channel = MethodChannel('kaoyan_review/reminder_alarm');
+    final messenger =
+        TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(channel, (call) async {
+      expect(call.method, 'fencePendingDispatch');
+      expect(call.arguments, {'dispatchToken': 'old-token'});
+      return false;
+    });
+    addTearDown(() => messenger.setMockMethodCallHandler(channel, null));
+
+    expect(
+      await AndroidReviewNotificationGateway().fencePendingDispatch(
+        'old-token',
+      ),
+      isFalse,
+    );
   });
 
   test('active notification query excludes the test notification ID', () async {

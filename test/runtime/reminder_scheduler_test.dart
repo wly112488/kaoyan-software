@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:flutter_test/flutter_test.dart';
@@ -164,6 +165,37 @@ void main() {
       expect(next.difference(now).inDays, lessThanOrEqualTo(37));
     },
   );
+
+  test('pending dispatch recovery runs before the next normal interval', () async {
+    await repository.saveSettings(
+      settings(
+        interval: const Duration(hours: 24),
+        cooldown: const Duration(hours: 24),
+      ),
+    );
+    final dispatchAt = now;
+    final db = await store.database;
+    await db.update('reminder_runtime_state', {
+      'last_dispatch_at_us': dispatchAt.microsecondsSinceEpoch,
+      'last_dispatch_item_id': 1,
+      'pending_dispatch_json': jsonEncode({
+        'item_id': 1,
+        'topic_id': 1,
+        'dispatch_at_us': dispatchAt.microsecondsSinceEpoch,
+        'owner_pid': -1,
+        'previous_count': 0,
+      }),
+    }, where: 'id = 1');
+    final scheduler = ReminderScheduler(
+      store: store,
+      work: _FakePeriodicWorkPort(),
+    );
+
+    expect(
+      await scheduler.nextOpportunityAt(now: now),
+      dispatchAt.add(const Duration(minutes: 3)).toLocal(),
+    );
+  });
 
   test('repeat opportunity follows the current content pool round', () async {
     final localNow = DateTime(2026, 9, 28, 12);

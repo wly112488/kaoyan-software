@@ -158,7 +158,7 @@ final class ReminderScheduler {
     final pending = await readPendingDispatch(await _store.database);
     if (pending == null) return due;
     final retryAt = pendingDispatchRetryAt(pending).toLocal();
-    return due == null || due.isBefore(retryAt) ? retryAt : due;
+    return due == null || retryAt.isBefore(due) ? retryAt : due;
   }
 
   Future<bool> reconcile(

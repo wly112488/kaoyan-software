@@ -24,6 +24,51 @@ DateTime pendingDispatchRetryAt(String encoded) {
   ).add(pendingDispatchLease);
 }
 
+bool pendingDispatchWasAccepted(String encoded) {
+  final row = jsonDecode(encoded) as Map<String, dynamic>;
+  return row['notification_accepted'] == true;
+}
+
+Future<bool> markPendingDispatchAccepted(Database db, String token) async {
+  return db.transaction((txn) async {
+    final encoded = await readPendingDispatch(txn);
+    if (encoded == null) return false;
+    final row = jsonDecode(encoded) as Map<String, dynamic>;
+    if (row['dispatch_token'] != token) return false;
+    row['notification_accepted'] = true;
+    return await txn.update(
+          'reminder_runtime_state',
+          {'pending_dispatch_json': jsonEncode(row)},
+          where: 'id = 1 AND pending_dispatch_json = ?',
+          whereArgs: [encoded],
+        ) ==
+        1;
+  });
+}
+
+Future<bool> markPendingDispatchFenced(
+  Database db,
+  String token, {
+  required bool submitted,
+}) async {
+  return db.transaction((txn) async {
+    final encoded = await readPendingDispatch(txn);
+    if (encoded == null) return false;
+    final row = jsonDecode(encoded) as Map<String, dynamic>;
+    if (row['dispatch_token'] != token) return false;
+    row['dispatch_fenced'] = true;
+    row['notification_accepted'] =
+        submitted || row['notification_accepted'] == true;
+    return await txn.update(
+          'reminder_runtime_state',
+          {'pending_dispatch_json': jsonEncode(row)},
+          where: 'id = 1 AND pending_dispatch_json = ?',
+          whereArgs: [encoded],
+        ) ==
+        1;
+  });
+}
+
 bool pendingDispatchIsLive(String encoded, DateTime now) {
   final row = jsonDecode(encoded) as Map<String, dynamic>;
   return row['owner_pid'] == pid &&
@@ -37,9 +82,10 @@ Future<void> recoverPendingDispatch(
   required DateTime now,
 }) async {
   final row = jsonDecode(encoded) as Map<String, dynamic>;
+  final accepted = submitted || row['notification_accepted'] == true;
   await db.transaction((txn) async {
     if (await readPendingDispatch(txn) != encoded) return;
-    if (!submitted) {
+    if (!accepted) {
       await txn.update(
         'review_items',
         {
@@ -59,7 +105,7 @@ Future<void> recoverPendingDispatch(
     await txn.update('reminder_runtime_state', {
       'pending_dispatch_json': null,
       'last_evaluation_at_us': now.microsecondsSinceEpoch,
-      'last_evaluation_outcome': submitted
+      'last_evaluation_outcome': accepted
           ? 'notification_submitted'
           : 'dispatch_recovered',
       if (!submitted) ...{
