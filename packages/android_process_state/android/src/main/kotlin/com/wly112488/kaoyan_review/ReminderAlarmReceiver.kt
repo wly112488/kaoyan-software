@@ -12,6 +12,12 @@ import android.content.pm.PackageManager
 import android.database.sqlite.SQLiteDatabase
 import android.os.Build
 import android.util.Log
+import androidx.work.ExistingWorkPolicy
+import androidx.work.OneTimeWorkRequest
+import androidx.work.WorkManager
+import java.util.concurrent.TimeUnit
+import org.json.JSONObject
+import android.os.Process
 import com.wly112488.android_process_state.ActivityVisibility
 import com.wly112488.android_process_state.R
 import java.time.LocalDate
@@ -24,17 +30,23 @@ private const val REMINDER_CHANNEL_NAME = "学习提醒"
 private const val REMINDER_PREFS = "kaoyan_review_reminder_alarm"
 private const val REMINDER_KEY_AT = "next_at_epoch_millis"
 private const val REVIEW_PAYLOAD_KEY = "reviewItemId"
+private const val NATIVE_RECOVERY_WORK = "kaoyan_review.native_recovery"
+private const val DISPATCH_LEASE_MILLIS = 180_000L
 
 class ReminderAlarmReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent?) {
         Log.i("ReminderAlarmReceiver", "received action=${intent?.action}")
-        if (intent?.action == Intent.ACTION_BOOT_COMPLETED ||
-            intent?.action == Intent.ACTION_MY_PACKAGE_REPLACED
-        ) {
-            scheduleStoredAlarm(context)
-            return
-        }
-        evaluateAndNotify(context)
+        val completion = goAsync()
+        Thread {
+            try {
+                if (intent?.action == Intent.ACTION_BOOT_COMPLETED ||
+                    intent?.action == Intent.ACTION_MY_PACKAGE_REPLACED) {
+                    scheduleStoredAlarm(context)
+                } else {
+                    runEvaluation(context)
+                }
+            } finally { completion.finish() }
+        }.start()
     }
 
     companion object {
@@ -67,12 +79,40 @@ class ReminderAlarmReceiver : BroadcastReceiver() {
             context.getSharedPreferences(REMINDER_PREFS, Context.MODE_PRIVATE)
                 .edit().remove(REMINDER_KEY_AT).apply()
             context.getSystemService(AlarmManager::class.java)?.cancel(alarmPendingIntent(context))
+            WorkManager.getInstance(context).cancelUniqueWork(NATIVE_RECOVERY_WORK)
         }
 
         fun scheduleStoredAlarm(context: Context) {
             val at = context.getSharedPreferences(REMINDER_PREFS, Context.MODE_PRIVATE)
                 .getLong(REMINDER_KEY_AT, -1L)
-            if (at > 0L) schedule(context, maxOf(at, System.currentTimeMillis() + 1_000L))
+            if (at > 0L) scheduleNext(context, maxOf(at, System.currentTimeMillis() + 1_000L))
+        }
+
+        private fun scheduleNext(context: Context, at: Long, fromWorker: Boolean = false, keepExisting: Boolean = false): Boolean {
+            try {
+                if (schedule(context, at, keepExisting)) return true
+            } catch (error: Exception) {
+                Log.w("ReminderAlarmBridge", "Exact alarm unavailable; scheduling recovery work", error)
+            }
+            return try {
+                context.getSharedPreferences(REMINDER_PREFS, Context.MODE_PRIVATE)
+                    .edit().putLong(REMINDER_KEY_AT, at).commit()
+                val request = OneTimeWorkRequest.Builder(NativeReminderWorker::class.java)
+                    .setInitialDelay(maxOf(0L, at-System.currentTimeMillis()), TimeUnit.MILLISECONDS)
+                    .build()
+                WorkManager.getInstance(context).enqueueUniqueWork(NATIVE_RECOVERY_WORK,
+                    when {
+                        fromWorker -> ExistingWorkPolicy.APPEND_OR_REPLACE
+                        keepExisting -> ExistingWorkPolicy.KEEP
+                        else -> ExistingWorkPolicy.REPLACE
+                    },
+                    request).result.get(3, TimeUnit.SECONDS)
+                Log.i("ReminderAlarmBridge", "Recovery worker registered for $at")
+                true
+            } catch (error: Exception) {
+                Log.e("ReminderAlarmBridge", "Recovery work registration failed", error)
+                false
+            }
         }
 
         private fun alarmPendingIntent(context: Context): PendingIntent {
@@ -86,25 +126,41 @@ class ReminderAlarmReceiver : BroadcastReceiver() {
             )
         }
 
-        private fun evaluateAndNotify(context: Context) {
+        fun runEvaluation(context: Context, fromWorker: Boolean = false): Boolean {
             var db: SQLiteDatabase? = null
             var dispatchReservation: DispatchReservation? = null
             var notificationSubmitted = false
             try {
                 val databaseFile = context.getDatabasePath("kaoyan_review.db")
-                if (!databaseFile.exists()) return
+                if (!databaseFile.exists()) return true
                 db = SQLiteDatabase.openDatabase(
                     databaseFile.path,
                     null,
                     SQLiteDatabase.OPEN_READWRITE or SQLiteDatabase.NO_LOCALIZED_COLLATORS,
                 )
                 db.rawQuery("PRAGMA busy_timeout = 5000", null).use { it.moveToFirst() }
+                // Package replacement can wake the receiver before Flutter runs
+                // its v9 migration. Add the nullable journal column in that case.
+                val hasJournal = db.rawQuery("PRAGMA table_info(reminder_runtime_state)", null).use { rows ->
+                    var found = false
+                    while (rows.moveToNext()) if (rows.getString(1) == "pending_dispatch_json") found = true
+                    found
+                }
+                if (!hasJournal) db.execSQL("ALTER TABLE reminder_runtime_state ADD COLUMN pending_dispatch_json TEXT")
                 val nowMillis = System.currentTimeMillis()
+                val pendingUntil = recoverPendingDispatch(context, db, nowMillis)
+                if (pendingUntil != null) return scheduleNext(context, pendingUntil, fromWorker, keepExisting = true)
+                // A receiver has no OS retry after process death. Register a
+                // recovery wake-up before committing a dispatch reservation.
+                if (!fromWorker && !scheduleNext(context, nowMillis + DISPATCH_LEASE_MILLIS, keepExisting = true)) return false
                 val now = LocalDateTime.ofInstant(
                     java.time.Instant.ofEpochMilli(nowMillis),
                     ZoneId.systemDefault(),
                 )
                 val evaluation = db.transaction {
+                    if (readPendingDispatch(db) != null) {
+                        return@transaction Evaluation(null, nowMillis + DISPATCH_LEASE_MILLIS)
+                    }
                     val settings = readSettings(db)
                     if (!settings.enabled) {
                         updateRuntime(db, nowMillis, "reminderDisabled", null)
@@ -143,6 +199,16 @@ class ReminderAlarmReceiver : BroadcastReceiver() {
                         if (!cursor.moveToFirst() || cursor.isNull(0)) null
                         else cursor.getLong(0) / 1_000L
                     }
+                    val pending = JSONObject()
+                        .put("item_id", candidate.id).put("topic_id", candidate.topicId)
+                        .put("dispatch_at_us", nowMillis*1000L).put("owner_pid", Process.myPid())
+                        .put("previous_count", candidate.reminderCount)
+                        .put("previous_item_at_us", candidate.lastShownAtMillis?.times(1000L) ?: JSONObject.NULL)
+                        .put("previous_topic_at_us", previousTopicLastRemindedAtMillis?.times(1000L) ?: JSONObject.NULL)
+                        .put("previous_dispatch_at_us", runtime.lastDispatchMillis?.times(1000L) ?: JSONObject.NULL)
+                        .put("previous_dispatch_item_id", runtime.lastDispatchItemId ?: JSONObject.NULL)
+                        .put("previous_dispatch_topic_id", runtime.lastDispatchTopicId ?: JSONObject.NULL)
+                    db.execSQL("UPDATE reminder_runtime_state SET pending_dispatch_json = ? WHERE id = 1", arrayOf(pending.toString()))
                     db.execSQL(
                         "UPDATE review_items SET last_shown_at_us = ?, reminder_count = reminder_count + 1 WHERE id = ?",
                         arrayOf<Any?>(nowMillis * 1_000L, candidate.id),
@@ -153,10 +219,10 @@ class ReminderAlarmReceiver : BroadcastReceiver() {
                     )
                     db.execSQL(
                         """UPDATE reminder_runtime_state
-                           SET last_evaluation_at_us = ?, last_evaluation_outcome = 'notification_submitted',
+                           SET last_evaluation_at_us = ?, last_evaluation_outcome = 'notification_pending',
                                last_dispatch_at_us = ?, last_dispatch_item_id = ?, last_dispatch_topic_id = ?,
                                last_evaluation_source = 'scheduled_alarm', last_worker_started_at_us = ?,
-                               last_worker_completed_at_us = ?, last_worker_outcome = 'nativeAlarmCompleted',
+                               last_worker_completed_at_us = ?, last_worker_outcome = 'notification_pending',
                                last_worker_error_at_us = NULL, last_worker_error_details = NULL
                            WHERE id = 1""".trimIndent(),
                         arrayOf<Any?>(
@@ -179,8 +245,18 @@ class ReminderAlarmReceiver : BroadcastReceiver() {
                 }
 
                 if (evaluation.candidate != null) {
-                    postReviewNotification(context, evaluation.candidate)
+                    val foreground = ActivityVisibility.isActivityResumed()
+                    if (foreground || !notificationsAvailable(context)) {
+                        rollbackDispatch(db, dispatchReservation!!)
+                        updateRuntime(db, nowMillis, if (foreground) "foregroundSuppressed" else "notificationUnavailable", "scheduled_alarm")
+                        return scheduleNext(context, nowMillis + readSettings(db).intervalMillis, fromWorker)
+                    }
+                    postReviewNotification(context, evaluation.candidate, dispatchReservation!!.dispatchedAtMillis)
                     notificationSubmitted = true
+                    db.execSQL("""UPDATE reminder_runtime_state SET pending_dispatch_json = NULL,
+                        last_evaluation_outcome = 'notification_submitted', last_worker_outcome = 'nativeAlarmCompleted'
+                        WHERE id = 1 AND last_dispatch_at_us = ? AND last_dispatch_item_id = ?""",
+                        arrayOf<Any?>(dispatchReservation!!.dispatchedAtMillis*1000L, evaluation.candidate.id))
                     Log.i(
                         "ReminderAlarmReceiver",
                         "submitted review notification itemId=${evaluation.candidate.id}",
@@ -188,9 +264,10 @@ class ReminderAlarmReceiver : BroadcastReceiver() {
                 }
                 val nextAt = evaluation.nextAtMillis
                 if (nextAt != null) {
-                    schedule(context, maxOf(nextAt, System.currentTimeMillis() + 1_000L))
+                    return scheduleNext(context, maxOf(nextAt, System.currentTimeMillis() + 1_000L), fromWorker)
                 } else {
                     cancel(context)
+                    return true
                 }
             } catch (error: Throwable) {
                 Log.e("ReminderAlarmReceiver", "evaluation failed", error)
@@ -198,7 +275,7 @@ class ReminderAlarmReceiver : BroadcastReceiver() {
                     rollbackDispatch(db, dispatchReservation!!)
                 }
                 recordFailure(db, error)
-                schedule(context, System.currentTimeMillis() + 60_000L)
+                return scheduleNext(context, System.currentTimeMillis() + 60_000L, fromWorker)
             } finally {
                 db?.close()
             }
@@ -213,6 +290,44 @@ class ReminderAlarmReceiver : BroadcastReceiver() {
             } finally {
                 endTransaction()
             }
+        }
+
+        private fun readPendingDispatch(db: SQLiteDatabase): String? =
+            db.rawQuery("SELECT pending_dispatch_json FROM reminder_runtime_state WHERE id = 1", null).use {
+                if (!it.moveToFirst() || it.isNull(0)) null else it.getString(0)
+            }
+
+        fun wasSubmitted(context: Context, itemId: Int, dispatchAtMillis: Long): Boolean {
+            val manager = context.getSystemService(NotificationManager::class.java) ?: return false
+            return manager.activeNotifications.any {
+                it.id == itemId && it.tag == null && it.notification.`when` == dispatchAtMillis &&
+                    (Build.VERSION.SDK_INT < 26 || it.notification.channelId == REMINDER_CHANNEL_ID)
+            }
+        }
+
+        private fun recoverPendingDispatch(context: Context, db: SQLiteDatabase, now: Long): Long? {
+            val encoded = readPendingDispatch(db) ?: return null
+            val pending = JSONObject(encoded)
+            val dispatchUs = pending.getLong("dispatch_at_us")
+            val until = dispatchUs/1000L + DISPATCH_LEASE_MILLIS
+            if (pending.getInt("owner_pid") == Process.myPid() && now < until) return until
+            val submitted = wasSubmitted(context, pending.getInt("item_id"), dispatchUs/1000L)
+            fun previous(key: String): Any? = if (pending.isNull(key)) null else pending.get(key)
+            db.transaction {
+                if (readPendingDispatch(db) != encoded) return@transaction Evaluation(null, null)
+                if (!submitted) {
+                    db.execSQL("UPDATE review_items SET last_shown_at_us = ?, reminder_count = ? WHERE id = ? AND last_shown_at_us = ?",
+                        arrayOf<Any?>(previous("previous_item_at_us"), pending.getInt("previous_count"), pending.getInt("item_id"), dispatchUs))
+                    db.execSQL("UPDATE topics SET last_reminded_at_us = ? WHERE id = ? AND last_reminded_at_us = ?",
+                        arrayOf<Any?>(previous("previous_topic_at_us"), pending.getInt("topic_id"), dispatchUs))
+                    db.execSQL("UPDATE reminder_runtime_state SET last_dispatch_at_us = ?, last_dispatch_item_id = ?, last_dispatch_topic_id = ? WHERE id = 1",
+                        arrayOf<Any?>(previous("previous_dispatch_at_us"), previous("previous_dispatch_item_id"), previous("previous_dispatch_topic_id")))
+                }
+                db.execSQL("UPDATE reminder_runtime_state SET pending_dispatch_json = NULL, last_evaluation_at_us = ?, last_evaluation_outcome = ? WHERE id = 1",
+                    arrayOf<Any?>(now*1000L, if (submitted) "notification_submitted" else "dispatch_recovered"))
+                Evaluation(null, null)
+            }
+            return null
         }
 
         private fun readSettings(db: SQLiteDatabase): Settings {
@@ -432,7 +547,7 @@ class ReminderAlarmReceiver : BroadcastReceiver() {
                     val previous = reservation.previousRuntime
                     db.execSQL(
                         """UPDATE reminder_runtime_state
-                           SET last_dispatch_at_us = ?, last_dispatch_item_id = ?, last_dispatch_topic_id = ?
+                           SET pending_dispatch_json = NULL, last_dispatch_at_us = ?, last_dispatch_item_id = ?, last_dispatch_topic_id = ?
                            WHERE id = 1 AND last_dispatch_at_us = ? AND last_dispatch_item_id = ?""".trimIndent(),
                         arrayOf<Any?>(
                             previous.lastDispatchMillis?.times(1_000L),
@@ -453,10 +568,18 @@ class ReminderAlarmReceiver : BroadcastReceiver() {
             if (Build.VERSION.SDK_INT >= 33 &&
                 context.checkSelfPermission(android.Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
             ) return false
-            return context.getSystemService(NotificationManager::class.java)?.areNotificationsEnabled() == true
+            val manager = context.getSystemService(NotificationManager::class.java) ?: return false
+            if (!manager.areNotificationsEnabled()) return false
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                manager.createNotificationChannel(
+                    NotificationChannel(REMINDER_CHANNEL_ID, REMINDER_CHANNEL_NAME, NotificationManager.IMPORTANCE_HIGH))
+                if (manager.getNotificationChannel(REMINDER_CHANNEL_ID)?.importance == NotificationManager.IMPORTANCE_NONE) return false
+            }
+            return true
         }
 
-        private fun postReviewNotification(context: Context, item: Item) {
+        private fun postReviewNotification(context: Context, item: Item, dispatchAtMillis: Long) {
+            check(notificationsAvailable(context)) { "Review notification channel is unavailable" }
             val manager = checkNotNull(context.getSystemService(NotificationManager::class.java)) {
                 "NotificationManager is unavailable"
             }
@@ -488,6 +611,7 @@ class ReminderAlarmReceiver : BroadcastReceiver() {
                 .setPriority(Notification.PRIORITY_HIGH)
                 .setVisibility(Notification.VISIBILITY_PRIVATE)
                 .setAutoCancel(true)
+                .setWhen(dispatchAtMillis)
                 .setContentIntent(contentIntent)
                 .build()
             manager.notify(item.id, notification)

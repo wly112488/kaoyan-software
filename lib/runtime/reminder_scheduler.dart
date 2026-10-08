@@ -4,6 +4,7 @@ import 'package:workmanager/workmanager.dart';
 
 import 'android_reminder_alarm_port.dart';
 import 'exact_reminder_alarm_port.dart';
+import 'pending_reminder_dispatch.dart';
 import '../data/local/app_database.dart';
 import '../data/local/reminder_runtime_state_repository.dart';
 import '../data/local/reminder_settings_repository.dart';
@@ -141,7 +142,7 @@ final class ReminderScheduler {
     final items = await _items.listReviewItems();
     final topics = await _topics.listTopics();
     final runtime = await _runtime.loadState();
-    return _calculateNextOpportunity(
+    final due = _calculateNextOpportunity(
       settings: settings,
       items: items,
       topics: topics,
@@ -150,6 +151,14 @@ final class ReminderScheduler {
       lastEvaluationOutcome: runtime.lastEvaluationOutcome,
       now: now ?? DateTime.now(),
     );
+    return _includePendingDispatch(due);
+  }
+
+  Future<DateTime?> _includePendingDispatch(DateTime? due) async {
+    final pending = await readPendingDispatch(await _store.database);
+    if (pending == null) return due;
+    final retryAt = pendingDispatchRetryAt(pending).toLocal();
+    return due == null || due.isBefore(retryAt) ? retryAt : due;
   }
 
   Future<bool> reconcile(
@@ -216,14 +225,16 @@ final class ReminderScheduler {
       final items = await _items.listReviewItems();
       final topics = await _topics.listTopics();
       final runtime = await _runtime.loadState();
-      final due = _calculateNextOpportunity(
-        settings: settings,
-        items: items,
-        topics: topics,
-        lastDispatchAt: runtime.lastDispatchAt,
-        lastEvaluationAt: runtime.lastEvaluationAt,
-        lastEvaluationOutcome: runtime.lastEvaluationOutcome,
-        now: localNow,
+      final due = await _includePendingDispatch(
+        _calculateNextOpportunity(
+          settings: settings,
+          items: items,
+          topics: topics,
+          lastDispatchAt: runtime.lastDispatchAt,
+          lastEvaluationAt: runtime.lastEvaluationAt,
+          lastEvaluationOutcome: runtime.lastEvaluationOutcome,
+          now: localNow,
+        ),
       );
       if (due == null) {
         await _work.cancel();

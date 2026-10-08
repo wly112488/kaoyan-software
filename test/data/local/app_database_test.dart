@@ -22,6 +22,53 @@ void main() {
   });
 
   test(
+    'version 8 upgrade adds a nullable dispatch journal without losing content',
+    () async {
+      final original = await AppDatabase.openWith(
+        factory: databaseFactoryFfi,
+        path: dbPath,
+      );
+      final db = await original.database;
+      await db.insert('topics', {
+        'id': 1,
+        'name': '保留主题',
+        'name_key': '保留主题',
+        'created_at_us': 1,
+        'updated_at_us': 1,
+      });
+      await db.insert('review_items', {
+        'id': 1,
+        'content': '保留正文',
+        'topic_id': 1,
+        'enabled': 1,
+        'created_at_us': 1,
+        'updated_at_us': 1,
+        'reminder_count': 7,
+      });
+      await db.execute(
+        'ALTER TABLE reminder_runtime_state DROP COLUMN pending_dispatch_json',
+      );
+      await db.execute('PRAGMA user_version = 8');
+      await original.close();
+      final upgraded = await AppDatabase.openWith(
+        factory: databaseFactoryFfi,
+        path: dbPath,
+      );
+      final reopened = await upgraded.database;
+      expect(
+        (await reopened.query('review_items')).single['reminder_count'],
+        7,
+      );
+      expect((await reopened.query('review_items')).single['content'], '保留正文');
+      expect(
+        (await reopened.query('reminder_runtime_state')).single,
+        containsPair('pending_dispatch_json', null),
+      );
+      await upgraded.close();
+    },
+  );
+
+  test(
     'fresh database enables foreign keys and persists initial settings',
     () async {
       final first = await AppDatabase.openWith(

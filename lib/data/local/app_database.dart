@@ -4,7 +4,7 @@ import 'package:sqflite/sqflite.dart';
 final class AppDatabase {
   AppDatabase._(this._factory, this._path);
 
-  static const schemaVersion = 8;
+  static const schemaVersion = 9;
   static const databaseFileName = 'kaoyan_review.db';
 
   final DatabaseFactory _factory;
@@ -176,7 +176,8 @@ final class AppDatabase {
         last_evaluation_source TEXT,
         last_worker_started_at_us INTEGER,
         last_worker_completed_at_us INTEGER,
-        last_worker_outcome TEXT
+        last_worker_outcome TEXT,
+        pending_dispatch_json TEXT
       )
     ''');
     await db.insert('reminder_runtime_state', <String, Object?>{
@@ -286,6 +287,9 @@ final class AppDatabase {
       await _addColumnIfMissing(db, 'last_worker_started_at_us', 'INTEGER');
       await _addColumnIfMissing(db, 'last_worker_completed_at_us', 'INTEGER');
       await _addColumnIfMissing(db, 'last_worker_outcome', 'TEXT');
+    }
+    if (oldVersion < 9) {
+      await _addColumnIfMissing(db, 'pending_dispatch_json', 'TEXT');
     }
   }
 

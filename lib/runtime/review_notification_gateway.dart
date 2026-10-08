@@ -1,4 +1,5 @@
 import 'package:flutter_local_notifications/flutter_local_notifications.dart';
+import 'package:flutter/services.dart';
 
 import '../domain/review_item.dart';
 
@@ -54,8 +55,14 @@ abstract interface class ReviewNotificationGateway {
   Future<void> sendTestNotification();
 }
 
-final class AndroidReviewNotificationGateway
+abstract interface class TrackedReviewNotificationGateway
     implements ReviewNotificationGateway {
+  Future<void> submitTracked(ReviewItem item, DateTime dispatchAt);
+  Future<bool> wasSubmitted(int itemId, DateTime dispatchAt);
+}
+
+final class AndroidReviewNotificationGateway
+    implements TrackedReviewNotificationGateway {
   AndroidReviewNotificationGateway({FlutterLocalNotificationsPlugin? plugin})
     : _plugin = plugin ?? FlutterLocalNotificationsPlugin();
 
@@ -84,8 +91,17 @@ final class AndroidReviewNotificationGateway
       >();
 
   @override
-  Future<bool> canPost() async =>
-      await _android?.areNotificationsEnabled() ?? false;
+  Future<bool> canPost() async {
+    final status = await channelStatus();
+    if (status.appEnabled && !status.channelExists) {
+      // Android 6/7 supports notifications but has no channel API.
+      return await const MethodChannel('kaoyan_review/reminder_alarm')
+          .invokeMethod<bool>('supportsNotificationChannels') == false;
+    }
+    return status.appEnabled &&
+        status.channelExists &&
+        status.importance != Importance.none;
+  }
 
   @override
   Future<bool> requestPermission() async =>
@@ -93,7 +109,7 @@ final class AndroidReviewNotificationGateway
 
   @override
   Future<NotificationChannelStatus> channelStatus() async {
-    final enabled = await canPost();
+    final enabled = await _android?.areNotificationsEnabled() ?? false;
     final channels = await _android?.getNotificationChannels();
     AndroidNotificationChannel? reminderChannel;
     for (final channel in channels ?? const <AndroidNotificationChannel>[]) {
@@ -140,7 +156,22 @@ final class AndroidReviewNotificationGateway
   }
 
   @override
-  Future<void> submit(ReviewItem item) async {
+  Future<void> submit(ReviewItem item) => _submit(item, null);
+
+  @override
+  Future<void> submitTracked(ReviewItem item, DateTime dispatchAt) =>
+      _submit(item, dispatchAt);
+
+  @override
+  Future<bool> wasSubmitted(int itemId, DateTime dispatchAt) async =>
+      await const MethodChannel('kaoyan_review/reminder_alarm')
+          .invokeMethod<bool>('wasSubmitted', {
+            'itemId': itemId,
+            'dispatchAtMillis': dispatchAt.millisecondsSinceEpoch,
+          }) ??
+      false;
+
+  Future<void> _submit(ReviewItem item, DateTime? dispatchAt) async {
     final notificationId = item.id % 2147483647;
     await _plugin.show(
       id: notificationId,
@@ -154,6 +185,7 @@ final class AndroidReviewNotificationGateway
           importance: Importance.high,
           priority: Priority.high,
           visibility: NotificationVisibility.private,
+          when: dispatchAt?.millisecondsSinceEpoch,
           styleInformation: BigTextStyleInformation(
             item.content,
             contentTitle: '考研碎片复习',

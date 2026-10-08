@@ -8,6 +8,70 @@ import 'package:kaoyan_review/runtime/review_notification_gateway.dart';
 void main() {
   TestWidgetsFlutterBinding.ensureInitialized();
 
+  test('Android before notification channels can still post', () async {
+    AndroidFlutterLocalNotificationsPlugin.registerWith();
+    debugDefaultTargetPlatformOverride = TargetPlatform.android;
+    const notifications = MethodChannel('dexterous.com/flutter/local_notifications');
+    const native = MethodChannel('kaoyan_review/reminder_alarm');
+    final messenger = TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+    messenger.setMockMethodCallHandler(notifications, (call) async {
+      if (call.method == 'areNotificationsEnabled') return true;
+      if (call.method == 'getNotificationChannels') return <Map<String, Object?>>[];
+      return null;
+    });
+    messenger.setMockMethodCallHandler(native, (call) async => false);
+    addTearDown(() {
+      debugDefaultTargetPlatformOverride = null;
+      messenger.setMockMethodCallHandler(notifications, null);
+      messenger.setMockMethodCallHandler(native, null);
+    });
+    expect(await AndroidReviewNotificationGateway().canPost(), isTrue);
+  });
+
+  for (final importance in <Importance>[
+    Importance.none,
+    Importance.low,
+    Importance.high,
+  ]) {
+    test('canPost respects review channel importance $importance', () async {
+      AndroidFlutterLocalNotificationsPlugin.registerWith();
+      debugDefaultTargetPlatformOverride = TargetPlatform.android;
+      const channel = MethodChannel(
+        'dexterous.com/flutter/local_notifications',
+      );
+      final messenger =
+          TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger;
+      messenger.setMockMethodCallHandler(channel, (call) async {
+        if (call.method == 'areNotificationsEnabled') return true;
+        if (call.method == 'getNotificationChannels') {
+          return <Map<String, Object?>>[
+            {
+              'id': 'study_reminders',
+              'name': '学习提醒',
+              'importance': importance.value,
+              'playSound': true,
+              'enableVibration': true,
+              'showBadge': true,
+              'enableLights': false,
+              'bypassDnd': false,
+              'ledColor': 0,
+              'audioAttributesUsage': 5,
+            },
+          ];
+        }
+        return null;
+      });
+      addTearDown(() {
+        debugDefaultTargetPlatformOverride = null;
+        messenger.setMockMethodCallHandler(channel, null);
+      });
+      expect(
+        await AndroidReviewNotificationGateway().canPost(),
+        importance != Importance.none,
+      );
+    });
+  }
+
   test('review item payload round-trips positive id', () {
     expect(decodeReviewItemPayload(encodeReviewItemPayload(42)), 42);
   });
@@ -56,7 +120,8 @@ void main() {
     });
 
     const content = 'expanded review body';
-    await AndroidReviewNotificationGateway().submit(
+    final dispatchAt = DateTime.utc(2026, 10, 8, 12);
+    await AndroidReviewNotificationGateway().submitTracked(
       ReviewItem(
         id: 7,
         content: content,
@@ -65,6 +130,7 @@ void main() {
         createdAt: DateTime.utc(2026),
         updatedAt: DateTime.utc(2026),
       ),
+      dispatchAt,
     );
 
     final call = calls.singleWhere((call) => call.method == 'show');
@@ -72,6 +138,7 @@ void main() {
     final specifics = args['platformSpecifics'] as Map<Object?, Object?>;
     final style = specifics['styleInformation'] as Map<Object?, Object?>;
     expect(style['bigText'], content);
+    expect(specifics['when'], dispatchAt.millisecondsSinceEpoch);
   });
 
   test('active notification query excludes the test notification ID', () async {

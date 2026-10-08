@@ -193,6 +193,86 @@ void main() {
     expect(state.lastDispatchTopicId, item.topicId);
   });
 
+  test('reopening recovers an interrupted unsent reservation without consuming history', () async {
+    final second = await items.createReviewItem(
+      content: '同一主题的第二条内容',
+      topicId: item.topicId,
+      enabled: true,
+      now: now,
+    );
+    await saveSettings(
+      interval: const Duration(minutes: 1),
+      repeatCooldown: const Duration(minutes: 1),
+    );
+    final db = await store.database;
+    await db.execute(
+      '''CREATE TRIGGER interrupt_rollback BEFORE UPDATE ON review_items
+      WHEN NEW.reminder_count = 0 BEGIN SELECT RAISE(ABORT, 'interrupted'); END''',
+    );
+    notifications.submitError = StateError(
+      'process interrupted before notification accepted',
+    );
+    expect(await createService().runOnce(), ReminderRunOutcome.storeFailure);
+    await db.execute('DROP TRIGGER interrupt_rollback');
+    await store.close();
+    store = await AppDatabase.openWith(factory: databaseFactoryFfi, path: path);
+    items = ReviewItemRepository(store);
+    runtime = ReminderRuntimeStateRepository(store);
+    notifications.submitError = null;
+    notifications.submittedIds.clear();
+    clock = _FixedClock(
+      now.add(const Duration(minutes: 4)),
+      DateTime(2026, 9, 28, 12, 4),
+    );
+    expect(
+      await createService().runOnce(),
+      ReminderRunOutcome.notificationSubmitted,
+    );
+    expect(notifications.submittedIds, [item.id]);
+    expect((await items.getReviewItem(item.id))!.reminderCount, 1);
+    expect((await items.getReviewItem(second.id))!.reminderCount, 0);
+  });
+
+  test('accepted notification is recovered without reposting after acknowledgement fails', () async {
+    await saveSettings(
+      interval: const Duration(minutes: 1),
+      repeatCooldown: const Duration(minutes: 1),
+    );
+    final db = await store.database;
+    await db.execute(
+      '''CREATE TRIGGER interrupt_ack BEFORE UPDATE ON reminder_runtime_state
+      WHEN NEW.last_evaluation_outcome = 'notification_submitted'
+      BEGIN SELECT RAISE(ABORT, 'interrupted after Android accepted'); END''',
+    );
+    expect(await createService().runOnce(), ReminderRunOutcome.storeFailure);
+    expect(notifications.submitCalls, 1);
+    expect(
+      (await db.query('reminder_runtime_state'))
+          .single['pending_dispatch_json'],
+      isNotNull,
+    );
+    await db.execute('DROP TRIGGER interrupt_ack');
+    await store.close();
+    store = await AppDatabase.openWith(factory: databaseFactoryFfi, path: path);
+    items = ReviewItemRepository(store);
+    clock = _FixedClock(
+      now.add(const Duration(minutes: 4)),
+      DateTime(2026, 9, 28, 12, 4),
+    );
+    foreground.result = true;
+    expect(
+      await createService().runOnce(),
+      ReminderRunOutcome.foregroundSuppressed,
+    );
+    expect(notifications.submitCalls, 1);
+    expect((await items.getReviewItem(item.id))!.reminderCount, 1);
+    expect(
+      (await (await store.database).query('reminder_runtime_state'))
+          .single['pending_dispatch_json'],
+      isNull,
+    );
+  });
+
   test(
     'weekly plan filters candidates to the current weekday topics',
     () async {
@@ -345,13 +425,24 @@ final class _FakeForegroundStatus implements ForegroundStatus {
   }
 }
 
-final class _FakeNotifications implements ReviewNotificationGateway {
+final class _FakeNotifications implements TrackedReviewNotificationGateway {
   bool available = true;
   int canPostCalls = 0;
   int submitCalls = 0;
   final List<int> submittedIds = <int>[];
   Object? submitError;
   Future<void> Function(ReviewItem item)? onSubmit;
+  final accepted = <int, DateTime>{};
+
+  @override
+  Future<void> submitTracked(ReviewItem item, DateTime dispatchAt) async {
+    await submit(item);
+    accepted[item.id] = dispatchAt;
+  }
+
+  @override
+  Future<bool> wasSubmitted(int itemId, DateTime dispatchAt) async =>
+      accepted[itemId] == dispatchAt;
 
   @override
   Future<void> initialize({void Function(int itemId)? onTap}) async {}

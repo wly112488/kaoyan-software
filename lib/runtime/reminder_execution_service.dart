@@ -1,5 +1,8 @@
 import 'package:sqflite/sqflite.dart';
 
+import 'dart:convert';
+import 'dart:io';
+
 import '../data/local/app_database.dart';
 import '../data/local/reminder_runtime_state_repository.dart';
 import '../data/local/reminder_settings_repository.dart';
@@ -11,6 +14,7 @@ import '../domain/reminder_scope.dart';
 import '../domain/review_item.dart';
 import 'foreground_status.dart';
 import 'review_notification_gateway.dart';
+import 'pending_reminder_dispatch.dart';
 
 enum ReminderRunOutcome {
   reminderDisabled,
@@ -75,6 +79,29 @@ final class ReminderExecutionService {
   Future<ReminderRunOutcome> runOnce({String source = 'unspecified'}) async {
     final db = await _store.database;
     try {
+      final interrupted = await readPendingDispatch(db);
+      if (interrupted != null) {
+        if (pendingDispatchIsLive(interrupted, _clock.nowUtc())) {
+          return ReminderRunOutcome.noEligibleItem;
+        }
+        final pending = jsonDecode(interrupted) as Map<String, dynamic>;
+        final gateway = _notifications;
+        final submitted =
+            gateway is TrackedReviewNotificationGateway &&
+            await gateway.wasSubmitted(
+              pending['item_id'] as int,
+              DateTime.fromMicrosecondsSinceEpoch(
+                pending['dispatch_at_us'] as int,
+                isUtc: true,
+              ),
+            );
+        await recoverPendingDispatch(
+          db,
+          interrupted,
+          submitted: submitted,
+          now: _clock.nowUtc(),
+        );
+      }
       final initialSettings = await _settings.loadSettings();
       final initialNowUtc = _clock.nowUtc();
       final initialNowLocal = _clock.nowLocal();
@@ -120,6 +147,9 @@ final class ReminderExecutionService {
 
       _DispatchReservation? reservation;
       final outcome = await db.transaction<ReminderRunOutcome?>((txn) async {
+        if (await readPendingDispatch(txn) != null) {
+          return ReminderRunOutcome.noEligibleItem;
+        }
         final settings = await _settings.loadSettingsFrom(txn);
         final nowUtc = _clock.nowUtc();
         final nowLocal = _clock.nowLocal();
@@ -201,6 +231,23 @@ final class ReminderExecutionService {
           previousRuntime: runtime,
           previousTopicLastRemindedAt: topicLastRemindedAt[candidate.topicId],
         );
+        await txn.update('reminder_runtime_state', {
+          'pending_dispatch_json': jsonEncode({
+            'item_id': candidate.id,
+            'topic_id': candidate.topicId,
+            'dispatch_at_us': dispatchAt.microsecondsSinceEpoch,
+            'owner_pid': pid,
+            'previous_item_at_us':
+                candidate.lastShownAt?.microsecondsSinceEpoch,
+            'previous_count': candidate.reminderCount,
+            'previous_topic_at_us':
+                topicLastRemindedAt[candidate.topicId]?.microsecondsSinceEpoch,
+            'previous_dispatch_at_us':
+                runtime.lastDispatchAt?.microsecondsSinceEpoch,
+            'previous_dispatch_item_id': runtime.lastDispatchItemId,
+            'previous_dispatch_topic_id': runtime.lastDispatchTopicId,
+          }),
+        }, where: 'id = 1');
         await _items.recordShownAtWith(
           txn,
           id: candidate.id,
@@ -247,7 +294,12 @@ final class ReminderExecutionService {
       try {
         // Platform-channel work must not run while holding SQLite's exclusive
         // transaction; Android may delay notification delivery independently.
-        await _notifications.submit(pending.candidate);
+        final gateway = _notifications;
+        if (gateway is TrackedReviewNotificationGateway) {
+          await gateway.submitTracked(pending.candidate, pending.dispatchAt);
+        } else {
+          await gateway.submit(pending.candidate);
+        }
       } catch (_) {
         await _rollbackDispatch(
           db,
@@ -258,12 +310,23 @@ final class ReminderExecutionService {
         return ReminderRunOutcome.notificationSubmissionFailed;
       }
 
-      await _runtime.recordEvaluation(
-        db,
-        at: _clock.nowUtc(),
-        outcome: 'notification_submitted',
-        source: source,
-      );
+      await db.transaction((txn) async {
+        await _runtime.recordEvaluation(
+          txn,
+          at: _clock.nowUtc(),
+          outcome: 'notification_submitted',
+          source: source,
+        );
+        await txn.update(
+          'reminder_runtime_state',
+          {'pending_dispatch_json': null},
+          where: 'id = 1 AND last_dispatch_at_us = ? AND last_dispatch_item_id = ?',
+          whereArgs: [
+            pending.dispatchAt.microsecondsSinceEpoch,
+            pending.candidate.id,
+          ],
+        );
+      });
       return ReminderRunOutcome.notificationSubmitted;
     } catch (_) {
       try {
@@ -319,6 +382,7 @@ final class ReminderExecutionService {
         ],
       );
       await txn.update('reminder_runtime_state', <String, Object?>{
+        'pending_dispatch_json': null,
         'last_evaluation_at_us': _clock.nowUtc().microsecondsSinceEpoch,
         'last_evaluation_outcome': evaluationOutcome,
         'last_evaluation_source': source,
