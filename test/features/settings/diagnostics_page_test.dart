@@ -124,7 +124,8 @@ Future<void> _waitForDiagnostics(WidgetTester tester) async {
   }
 }
 
-final class _AvailableNotifications implements ReviewNotificationGateway {
+final class _AvailableNotifications
+    implements TrackedReviewNotificationGateway {
   Object? channelStatusError;
 
   @override
@@ -153,5 +154,12 @@ final class _AvailableNotifications implements ReviewNotificationGateway {
   Future<void> sendTestNotification() async {}
 
   @override
-  Future<void> submit(ReviewItem item) async {}
+  Future<bool> submitTracked(
+    ReviewItem item,
+    DateTime dispatchAt,
+    String dispatchToken,
+  ) async => true;
+
+  @override
+  Future<bool?> fencePendingDispatch(String dispatchToken) async => false;
 }

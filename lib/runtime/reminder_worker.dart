@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'dart:ui';
 import 'dart:developer' as developer;
 
@@ -22,12 +21,6 @@ void reminderCallbackDispatcher() {
 
     return _runReminderEvaluation(source: 'workmanager');
   });
-}
-
-@pragma('vm:entry-point')
-void reminderAlarmCallback() {
-  DartPluginRegistrant.ensureInitialized();
-  unawaited(_runReminderEvaluation(source: 'alarm_manager'));
 }
 
 Future<bool> _runReminderEvaluation({required String source}) async {
@@ -56,7 +49,9 @@ Future<bool> _runReminderEvaluation({required String source}) async {
     );
     final outcome = await service.runOnce(source: source);
     if (outcome == ReminderRunOutcome.storeFailure) {
-      throw StateError('Reminder evaluation could not read or update the store');
+      throw StateError(
+        'Reminder evaluation could not read or update the store',
+      );
     }
     stage = '读取提醒设置';
     final settings = await ReminderSettingsRepository(store).loadSettings();

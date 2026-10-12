@@ -18,7 +18,7 @@ final class AppServices {
     required this.store,
     this.runtimeInitializationError,
     this.runtimeInitializer,
-    ReviewNotificationGateway? notifications,
+    TrackedReviewNotificationGateway? notifications,
     PeriodicWorkPort? periodicWork,
     ForegroundStatus? foregroundStatus,
     ReminderClock clock = const SystemReminderClock(),
@@ -83,7 +83,7 @@ final class AppServices {
   final ReviewItemRepository reviewItems;
   final ReminderSettingsRepository reminderSettings;
   final ReminderRuntimeStateRepository runtimeState;
-  final ReviewNotificationGateway notifications;
+  final TrackedReviewNotificationGateway notifications;
   final ReminderScheduler scheduler;
   late final ReminderSettingsService settingsService;
   late final ReminderExecutionService executionService;

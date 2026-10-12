@@ -47,7 +47,7 @@ final class ReminderExecutionService {
   ReminderExecutionService({
     required AppDatabase store,
     required ForegroundStatus foregroundStatus,
-    required ReviewNotificationGateway notifications,
+    required TrackedReviewNotificationGateway notifications,
     ReminderClock clock = const SystemReminderClock(),
     ReminderEvaluator? evaluator,
     ReminderCandidateSelector? selector,
@@ -68,7 +68,7 @@ final class ReminderExecutionService {
 
   final AppDatabase _store;
   final ForegroundStatus _foregroundStatus;
-  final ReviewNotificationGateway _notifications;
+  final TrackedReviewNotificationGateway _notifications;
   final ReminderClock _clock;
   final ReminderEvaluator _evaluator;
   final ReminderCandidateSelector _selector;
@@ -86,11 +86,7 @@ final class ReminderExecutionService {
           return ReminderRunOutcome.noEligibleItem;
         }
         final pending = jsonDecode(interrupted) as Map<String, dynamic>;
-        final gateway = _notifications;
-        if (gateway is! TrackedReviewNotificationGateway) {
-          return ReminderRunOutcome.noEligibleItem;
-        }
-        final submittedByPlatform = await gateway.fencePendingDispatch(
+        final submittedByPlatform = await _notifications.fencePendingDispatch(
           pending['dispatch_token'] as String,
         );
         if (submittedByPlatform == null) {
@@ -310,27 +306,21 @@ final class ReminderExecutionService {
       try {
         // Platform-channel work must not run while holding SQLite's exclusive
         // transaction; Android may delay notification delivery independently.
-        final gateway = _notifications;
-        if (gateway is TrackedReviewNotificationGateway) {
-          final accepted = await gateway.submitTracked(
-            pending.candidate,
-            pending.dispatchAt,
-            pending.token,
+        final accepted = await _notifications.submitTracked(
+          pending.candidate,
+          pending.dispatchAt,
+          pending.token,
+        );
+        if (!accepted) {
+          await _rollbackDispatch(
+            db,
+            pending,
+            evaluationOutcome: 'notification_dispatch_superseded',
+            source: source,
           );
-          if (!accepted) {
-            await _rollbackDispatch(
-              db,
-              pending,
-              evaluationOutcome: 'notification_dispatch_superseded',
-              source: source,
-            );
-            return ReminderRunOutcome.notificationSubmissionFailed;
-          }
-          await markPendingDispatchAccepted(db, pending.token);
-        } else {
-          await gateway.submit(pending.candidate);
-          await markPendingDispatchAccepted(db, pending.token);
+          return ReminderRunOutcome.notificationSubmissionFailed;
         }
+        await markPendingDispatchAccepted(db, pending.token);
       } catch (_) {
         await _rollbackDispatch(
           db,

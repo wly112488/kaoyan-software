@@ -67,6 +67,11 @@ void main() {
             'last_dispatch_at_us': null,
             'last_dispatch_item_id': null,
             'last_dispatch_topic_id': null,
+            'last_worker_error_at_us': null,
+            'last_worker_error_details': null,
+            'last_worker_started_at_us': null,
+            'last_worker_completed_at_us': null,
+            'last_worker_outcome': null,
           },
           where: 'id = 1',
         );
@@ -151,6 +156,24 @@ void main() {
           state.lastEvaluationSource,
           fallback ? 'workmanager' : 'scheduled_alarm',
         );
+        if (fallback) {
+          final workerDeadline = DateTime.now().add(
+            const Duration(seconds: 30),
+          );
+          while ((state.lastWorkerStartedAt == null ||
+                  state.lastWorkerCompletedAt == null ||
+                  state.lastWorkerCompletedAt!.isBefore(
+                    state.lastDispatchAt!,
+                  ) ||
+                  state.lastWorkerOutcome != 'notificationSubmitted') &&
+              DateTime.now().isBefore(workerDeadline)) {
+            await Future<void>.delayed(const Duration(milliseconds: 250));
+            state = await services.runtimeState.loadState();
+          }
+          expect(state.lastWorkerStartedAt, isNotNull);
+          expect(state.lastWorkerCompletedAt, isNotNull);
+          expect(state.lastWorkerOutcome, 'notificationSubmitted');
+        }
       } finally {
         await AndroidReminderAlarmPort().cancel();
         await WorkmanagerOneOffWorkPort().cancel();

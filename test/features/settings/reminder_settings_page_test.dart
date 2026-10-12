@@ -140,7 +140,7 @@ Future<void> _flushDatabaseWork(WidgetTester tester, {int times = 1}) async {
   }
 }
 
-final class _FakeNotifications implements ReviewNotificationGateway {
+final class _FakeNotifications implements TrackedReviewNotificationGateway {
   int permissionRequests = 0;
   Object? channelStatusError;
 
@@ -173,7 +173,14 @@ final class _FakeNotifications implements ReviewNotificationGateway {
   Future<void> sendTestNotification() async {}
 
   @override
-  Future<void> submit(ReviewItem item) async {}
+  Future<bool> submitTracked(
+    ReviewItem item,
+    DateTime dispatchAt,
+    String dispatchToken,
+  ) async => true;
+
+  @override
+  Future<bool?> fencePendingDispatch(String dispatchToken) async => false;
 }
 
 final class _FailingWorkPort implements PeriodicWorkPort {

@@ -49,7 +49,6 @@ abstract interface class ReviewNotificationGateway {
   Future<void> initialize({void Function(int itemId)? onTap});
   Future<bool> canPost();
   Future<bool> requestPermission();
-  Future<void> submit(ReviewItem item);
   Future<NotificationChannelStatus> channelStatus();
   Future<List<int>> activeReviewItemNotificationIds();
   Future<void> sendTestNotification();
@@ -63,7 +62,6 @@ abstract interface class TrackedReviewNotificationGateway
     String dispatchToken,
   );
   Future<bool?> fencePendingDispatch(String dispatchToken);
-  Future<bool> wasSubmitted(int itemId, DateTime dispatchAt);
 }
 
 final class AndroidReviewNotificationGateway
@@ -101,7 +99,8 @@ final class AndroidReviewNotificationGateway
     if (status.appEnabled && !status.channelExists) {
       // Android 6/7 supports notifications but has no channel API.
       return await const MethodChannel('kaoyan_review/reminder_alarm')
-          .invokeMethod<bool>('supportsNotificationChannels') == false;
+              .invokeMethod<bool>('supportsNotificationChannels') ==
+          false;
     }
     return status.appEnabled &&
         status.channelExists &&
@@ -161,9 +160,6 @@ final class AndroidReviewNotificationGateway
   }
 
   @override
-  Future<void> submit(ReviewItem item) => _submit(item, null);
-
-  @override
   Future<bool> submitTracked(
     ReviewItem item,
     DateTime dispatchAt,
@@ -184,39 +180,4 @@ final class AndroidReviewNotificationGateway
           .invokeMethod<bool>('fencePendingDispatch', {
             'dispatchToken': dispatchToken,
           });
-
-  @override
-  Future<bool> wasSubmitted(int itemId, DateTime dispatchAt) async =>
-      await const MethodChannel('kaoyan_review/reminder_alarm')
-          .invokeMethod<bool>('wasSubmitted', {
-            'itemId': itemId,
-            'dispatchAtMillis': dispatchAt.millisecondsSinceEpoch,
-          }) ??
-      false;
-
-  Future<void> _submit(ReviewItem item, DateTime? dispatchAt) async {
-    final notificationId = item.id % 2147483647;
-    await _plugin.show(
-      id: notificationId,
-      title: '考研碎片复习',
-      body: item.content,
-      notificationDetails: NotificationDetails(
-        android: AndroidNotificationDetails(
-          _channelId,
-          _channelName,
-          channelDescription: _channelDescription,
-          importance: Importance.high,
-          priority: Priority.high,
-          visibility: NotificationVisibility.private,
-          when: dispatchAt?.millisecondsSinceEpoch,
-          styleInformation: BigTextStyleInformation(
-            item.content,
-            contentTitle: '考研碎片复习',
-            summaryText: '复习内容',
-          ),
-        ),
-      ),
-      payload: encodeReviewItemPayload(item.id),
-    );
-  }
 }

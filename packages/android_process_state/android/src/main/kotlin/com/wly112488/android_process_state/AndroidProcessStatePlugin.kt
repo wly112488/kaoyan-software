@@ -38,11 +38,6 @@ class AndroidProcessStatePlugin : FlutterPlugin, MethodChannel.MethodCallHandler
                                 ?: throw IllegalArgumentException("Missing dispatch token"),
                         ),
                     )
-                    "wasSubmitted" -> result.success(ReminderAlarmReceiver.wasSubmitted(
-                        context,
-                        call.argument<Number>("itemId")!!.toInt(),
-                        call.argument<Number>("dispatchAtMillis")!!.toLong(),
-                    ))
                     "schedule" -> {
                         val at = call.argument<Number>("atEpochMillis")?.toLong()
                             ?: throw IllegalArgumentException("Missing alarm time")

@@ -188,7 +188,7 @@ final class _FakeForegroundStatus implements ForegroundStatus {
   Future<bool> isForeground() async => result;
 }
 
-final class _FakeNotifications implements ReviewNotificationGateway {
+final class _FakeNotifications implements TrackedReviewNotificationGateway {
   final List<int> submittedItems = <int>[];
 
   @override
@@ -215,6 +215,18 @@ final class _FakeNotifications implements ReviewNotificationGateway {
   Future<void> sendTestNotification() async {}
 
   @override
+  Future<bool> submitTracked(
+    ReviewItem item,
+    DateTime dispatchAt,
+    String dispatchToken,
+  ) async {
+    await submit(item);
+    return true;
+  }
+
+  @override
+  Future<bool?> fencePendingDispatch(String dispatchToken) async => false;
+
   Future<void> submit(ReviewItem item) async {
     submittedItems.add(item.id);
   }
